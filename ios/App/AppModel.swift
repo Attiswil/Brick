@@ -17,25 +17,27 @@ struct Banner: Identifiable, Equatable {
     var isError: Bool
 }
 
-/// UI state + actions. Everything that changes the brick goes through
-/// `BrickSync`, so the app, Shortcuts and extensions all follow one set of rules.
+/// UI state + actions. The phone decides everything locally and instantly;
+/// Home Assistant (if linked) is told afterwards and can send commands.
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
     static let refreshTaskId = (Bundle.main.bundleIdentifier ?? "com.example.brickhub") + ".refresh"
 
     @Published private(set) var state = BrickState()
+    @Published private(set) var rules = BrickRules()
+    @Published private(set) var stats = BrickStats()
     @Published private(set) var modes: [BrickMode] = []
     @Published private(set) var schedules: [BrickSchedule] = []
     @Published private(set) var tags: [TagItem] = []
     @Published private(set) var connection: HAConnection?
-    @Published private(set) var pendingCount = 0
-    @Published private(set) var lastSync: Date?
-    @Published var online: Bool?
+    @Published private(set) var lastReport: Date?
+    @Published private(set) var needsReport = false
+    @Published var haReachable: Bool?
     @Published var busy = false
     @Published var banner: Banner?
     @Published private(set) var authorized = false
-    /// Set by the "Scan brick" Shortcut so the UI starts a scan on launch.
+    /// Set by the "Scan Brick" Shortcut so the UI starts a scan on launch.
     @Published var scanRequested = false
 
     let store = SharedStore.shared
@@ -47,86 +49,74 @@ final class AppModel: ObservableObject {
     func reload() {
         let book = store.book
         state = book.state
-        if store.connection == nil {
-            // Standalone: stats are computed on the phone.
-            state.stats = BrickEngine.stats(book)
-        }
+        rules = book.rules
+        stats = BrickEngine.stats(book)
         modes = store.modes
         schedules = store.schedules
         tags = book.tags.map { TagItem(hash: $0.key, name: $0.value) }.sorted { $0.name < $1.name }
         connection = store.connection
-        pendingCount = store.pending.count
-        lastSync = store.lastSync
+        lastReport = store.lastReport
+        needsReport = store.needsReport
         authorized = ShieldController.isAuthorized
     }
 
     var isConnected: Bool { connection != nil }
 
-    // MARK: Foreground sync
-
-    func startForegroundSync() {
-        pollTask?.cancel()
-        pollTask = Task { [weak self] in
-            await self?.syncLoop()
-        }
+    func modeName(_ id: String?) -> String? {
+        modes.first { $0.id == id }?.name
     }
 
-    func stopForegroundSync() {
+    // MARK: While the app is open
+
+    /// Ticks local timers; if linked to HA, reports and long-polls for commands.
+    func startForegroundLoop() {
+        pollTask?.cancel()
+        pollTask = Task { [weak self] in await self?.foregroundLoop() }
+    }
+
+    func stopForegroundLoop() {
         pollTask?.cancel()
         pollTask = nil
     }
 
-    private func syncLoop() async {
-        await BrickSync.shared.heartbeat()
-        var first = true
+    private func foregroundLoop() async {
+        LocalRunner.tick()
+        reload()
+        if isConnected { await BrickSync.shared.report() }
         while !Task.isCancelled {
             if store.connection == nil {
-                await BrickSync.shared.tickLocal()
-                reload()
                 try? await Task.sleep(for: .seconds(15))
+                LocalRunner.tick()
+                reload()
                 continue
             }
             do {
-                // First call returns immediately; then long-poll for changes.
-                try await BrickSync.shared.refresh(since: first ? nil : state.revision, wait: 25)
-                online = true
-                first = false
+                try await BrickSync.shared.pollCommands(wait: 25)
+                haReachable = true
             } catch {
-                online = false
-                await BrickSync.shared.tickLocal()
-                reload()
-                try? await Task.sleep(for: .seconds(10))
+                haReachable = false
+                try? await Task.sleep(for: .seconds(15))
             }
+            LocalRunner.tick()
             reload()
         }
     }
 
     func syncNow() async {
-        do {
-            try await BrickSync.shared.refresh()
-            await BrickSync.shared.heartbeat()
-            online = true
-        } catch {
-            online = false
-            show(error)
-        }
+        LocalRunner.tick()
+        await BrickSync.shared.report()
+        haReachable = isConnected ? !store.needsReport : nil
         reload()
     }
 
-    // MARK: Brick actions
+    // MARK: Brick actions (all instant and local)
 
     @discardableResult
-    func run(_ cmd: PendingCommand, success: String? = nil) async -> Bool {
-        busy = true
-        defer { busy = false; reload() }
+    func run(_ cmd: BrickCommand, success: String? = nil) async -> Bool {
+        defer { reload() }
         do {
-            let outcome = try await BrickSync.shared.perform(cmd)
-            online = outcome == .online ? true : (outcome == .offline ? false : online)
-            if outcome == .offline {
-                banner = Banner(text: "Home Assistant is unreachable - done on this phone and queued.", isError: false)
-            } else if let success {
-                banner = Banner(text: success, isError: false)
-            }
+            try await BrickSync.shared.perform(cmd)
+            if let success { banner = Banner(text: success, isError: false) }
             UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
             return true
         } catch {
@@ -137,11 +127,11 @@ final class AppModel: ObservableObject {
     }
 
     func brickNow(modeId: String?, minutes: Double?) async {
-        await run(PendingCommand(action: .brick, method: .manual, modeId: modeId,
-                                 durationMinutes: minutes, source: deviceLabel))
+        await run(BrickCommand(action: .brick, method: .manual, modeId: modeId,
+                               durationMinutes: minutes, source: "This iPhone"))
     }
 
-    /// Tap the brick: unbricks if bricked, otherwise bricks (like the real thing).
+    /// Tap the brick: unbricks if bricked, otherwise bricks.
     func scanBrick(modeId: String? = nil, minutes: Double? = nil) async {
         scanRequested = false
         let bricked = state.bricked
@@ -158,34 +148,28 @@ final class AppModel: ObservableObject {
             show(error)
             return
         }
-        // Standalone: we can check the tag ourselves. Connected: HA decides
-        // (it may know tags registered from ESPHome readers etc).
-        if !isConnected && !BrickEngine.isKnownTag(store.book, tagId) {
-            show(BrickRefusal(code: "unknown_tag", message: "That isn't one of your brick tags. Add it in Settings first."))
-            return
-        }
-        await run(PendingCommand(action: bricked ? .unbrick : .brick, method: .tag,
-                                 modeId: bricked ? nil : modeId,
-                                 durationMinutes: bricked ? nil : minutes,
-                                 tagId: tagId, source: deviceLabel))
+        await run(BrickCommand(action: bricked ? .unbrick : .brick, method: .tag,
+                               modeId: bricked ? nil : modeId,
+                               durationMinutes: bricked ? nil : minutes,
+                               tagId: tagId, source: "Brick tag"))
     }
 
     func unbrickWithoutTag() async {
-        await run(PendingCommand(action: .unbrick, method: .manual, source: deviceLabel))
+        await run(BrickCommand(action: .unbrick, method: .manual, source: "This iPhone"))
     }
 
     func emergencyUnbrick() async {
-        await run(PendingCommand(action: .emergencyUnbrick, method: .emergency, source: deviceLabel),
+        await run(BrickCommand(action: .emergencyUnbrick, method: .emergency, source: "Emergency"),
                   success: "Emergency unbrick used.")
     }
 
     func requestReset() async {
-        await run(PendingCommand(action: .requestReset),
-                  success: "Reset requested. Your emergency unbricks refill in \(Int(state.resetHours)) hours.")
+        await run(BrickCommand(action: .requestReset),
+                  success: "Reset requested. Your emergency unbricks refill in \(Int(rules.resetHours)) hours.")
     }
 
     func cancelReset() async {
-        await run(PendingCommand(action: .cancelReset))
+        await run(BrickCommand(action: .cancelReset))
     }
 
     // MARK: Tags
@@ -194,8 +178,8 @@ final class AppModel: ObservableObject {
         do {
             let tagId = try await scanner.scan(prompt: "Hold the new brick near the top of your iPhone.",
                                                success: "Brick added")
-            await run(PendingCommand(action: .registerTag, tagId: tagId, tagName: name),
-                      success: "Added \(name.isEmpty ? "brick" : name).")
+            await run(BrickCommand(action: .registerTag, tagId: tagId, tagName: name),
+                      success: "Added \(name.isEmpty ? "your brick" : name).")
         } catch NFCScanner.ScanError.cancelled {
         } catch {
             show(error)
@@ -203,10 +187,21 @@ final class AppModel: ObservableObject {
     }
 
     func removeTag(hash: String) async {
-        await run(PendingCommand(action: .removeTag, tagId: hash))
+        await run(BrickCommand(action: .removeTag, tagId: hash))
     }
 
-    // MARK: Modes & schedules (locked while bricked)
+    // MARK: Rules, modes & schedules (locked while bricked)
+
+    func save(rules newRules: BrickRules) {
+        do {
+            try LocalRunner.setRules(newRules)
+            banner = Banner(text: "Rules saved.", isError: false)
+            Task { await BrickSync.shared.report() }
+        } catch {
+            show(error)
+        }
+        reload()
+    }
 
     func save(mode: BrickMode) {
         guard !state.bricked else { return }
@@ -214,14 +209,14 @@ final class AppModel: ObservableObject {
         if let i = all.firstIndex(where: { $0.id == mode.id }) { all[i] = mode } else { all.append(mode) }
         store.modes = all
         reload()
-        Task { await BrickSync.shared.heartbeat() }
+        Task { await BrickSync.shared.report() }
     }
 
     func delete(mode: BrickMode) {
         guard !state.bricked else { return }
         store.modes = store.modes.filter { $0.id != mode.id }
         reload()
-        Task { await BrickSync.shared.heartbeat() }
+        Task { await BrickSync.shared.report() }
     }
 
     func save(schedule: BrickSchedule) {
@@ -240,15 +235,7 @@ final class AppModel: ObservableObject {
         reload()
     }
 
-    // MARK: Standalone rules
-
-    func updateStandalone(emergencyMax: Int, resetHours: Double, strict: Bool) {
-        guard !isConnected, !state.bricked else { return }
-        store.updateBook { BrickEngine.applySettings(&$0, emergencyMax: emergencyMax, resetHours: resetHours, strict: strict) }
-        reload()
-    }
-
-    // MARK: Connection
+    // MARK: Home Assistant link (optional)
 
     func connect(url: String, token: String, deviceName: String) async -> Bool {
         var text = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -265,9 +252,9 @@ final class AppModel: ObservableObject {
                 baseURL: base, token: token.trimmingCharacters(in: .whitespacesAndNewlines),
                 deviceName: deviceName.isEmpty ? "iPhone" : deviceName
             )
-            online = true
-            banner = Banner(text: "Connected to Home Assistant.", isError: false)
-            startForegroundSync()
+            haReachable = true
+            banner = Banner(text: "Linked to Home Assistant.", isError: false)
+            startForegroundLoop()
             return true
         } catch {
             show(error)
@@ -275,10 +262,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Unlinking never changes the brick - the phone owns it either way.
     func disconnect() async {
-        guard !state.bricked else { return }
         await BrickSync.shared.disconnect()
-        online = nil
+        haReachable = nil
         reload()
     }
 
@@ -291,7 +278,7 @@ final class AppModel: ObservableObject {
             show(error)
         }
         reload()
-        await BrickSync.shared.heartbeat()
+        Task { await BrickSync.shared.report() }
     }
 
     func requestNotifications() async {
@@ -305,10 +292,6 @@ final class AppModel: ObservableObject {
         req.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
         try? BGTaskScheduler.shared.submit(req)
     }
-
-    // MARK: Helpers
-
-    private var deviceLabel: String { store.connection?.deviceName ?? "iPhone" }
 
     func show(_ error: Error) {
         banner = Banner(text: error.localizedDescription, isError: true)

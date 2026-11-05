@@ -1,117 +1,81 @@
 # Brick Hub
 
-An NFC "brick" app blocker for iPhone, powered by **Home Assistant**. Any
-Home Assistant trigger can brick your phone: a time, leaving home, the TV
-turning on, a door sensor, a tag scan or a button. The iPhone app blocks the
-apps with Apple's own Screen Time API.
+An NFC "brick" app blocker for iPhone. It works entirely on its own, and if
+you use **Home Assistant**, any HA trigger can brick it too: a time, leaving
+home, the TV turning on, a door sensor or an NFC reader by the door.
 
-No AI, no accounts, no cloud service of ours. State lives in your Home
-Assistant and on your phone.
+No AI, no accounts, no cloud service of ours.
 
 ```
- any HA trigger ──► brick_hub.brick ──► Brick Hub integration (source of truth)
- (time, zone, TV,                          │  rules: strict mode, emergency
-  door, ESPHome NFC…)                      │  unbricks, 48 h reset, timers
-                                           ▼
-                         APNs push  ──►  iPhone (notification extension applies
-                         long-poll  ──►   the Screen Time shield immediately)
-                                           ▲
- tap your NFC brick in the app ────────────┘  (works offline too, syncs later)
+                     ┌──────────────── iPhone (the boss) ────────────────┐
+ tap your brick ───► │ rules · strict mode · emergency unbricks · 48h    │
+ timer / schedule ─► │ reset · tags · stats  ──►  Screen Time shields    │
+ iOS Shortcut ─────► │                                                   │
+                     └───────▲────────────────────────────┬──────────────┘
+                   commands  │ push / long-poll           │ reports its state
+                  (optional) │ dropped if not delivered   ▼ (optional)
+                     ┌───────┴──── Home Assistant ─────────────────────────┐
+ any HA trigger ───► │ brick_hub.brick / unbrick ...   mirror entities     │
+ ESPHome NFC ──────► │ tag scans forwarded to the phone   + events         │
+                     └─────────────────────────────────────────────────────┘
 ```
+
+**The phone makes every decision.** Home Assistant can *ask* it to brick or
+unbrick, and it shows what the phone reports, but it can't override the rules.
+If HA is down, unreachable or never installed, nothing changes on the phone.
 
 ## Features
 
 | | Brick | Brick Hub |
 |---|---|---|
 | Tap an NFC tag to brick / unbrick | ✅ | ✅ any NTAG sticker, card or fob |
-| Modes (block list) | ✅ | ✅ block list **or** allow list, apps + categories + websites |
+| Works without anything else | ✅ | ✅ |
+| Modes | ✅ | ✅ block list **or** allow list, apps + categories + websites |
 | Prevent deleting apps while bricked | ✅ | ✅ per mode |
-| Schedules | ✅ | ✅ on-device (works with no signal) **plus** anything HA can do |
-| Timed bricks | ✅ | ✅ and timers can only be extended, never shortened |
+| Schedules | ✅ | ✅ on-device, work with no signal |
+| Timed bricks | ✅ | ✅ can be extended, never shortened |
 | Emergency unbricks | ✅ 5, then email support | ✅ configurable, then a **reset that takes 2 days** |
 | Stats | ✅ | ✅ today, 7 days, streak, longest; also as HA sensors |
-| Triggers | the tag | the tag, **any Home Assistant trigger**, iOS Shortcuts automations, ESPHome NFC readers, the HA Companion app's tag scanner |
-| Strict mode | — | ✅ manual unbricks refused; only a tag, timer, schedule, automation or emergency unbrick ends a brick |
-| Works offline | ✅ | ✅ offline actions are queued and replayed to HA |
-| Knows if you turned off Screen Time access | — | ✅ `binary_sensor.brick_hub_screen_time_access`, so you can automate a nag |
-| Needs a hardware purchase | ✅ the Brick | ❌ any NFC tag (or none) |
+| Triggers | the tag | the tag, timers, schedules, iOS Shortcuts automations, **any Home Assistant trigger**, ESPHome NFC readers |
+| Strict mode | — | ✅ manual unbricks refused |
+| Needs a hardware purchase | ✅ the Brick | ❌ any NFC tag |
 
-### Emergency unbricks and the 2-day reset
+## The rules (set in the app, locked while bricked)
 
-You get a limited number of emergency unbricks (5 by default). Each one ends a
-brick immediately, whatever the rules. When you've used some, press
-**Request reset** in the app or in Home Assistant. Your allowance refills
-**48 hours later** (you can change the delay). There's no email and no support
-ticket. When connected, the countdown runs on Home Assistant's clock, so
-changing the phone's clock doesn't speed it up. Requesting again doesn't restart it, and raising the
-maximum doesn't refill anything. You can optionally have the reset start
-automatically when you run out.
+**Strict mode** (on by default). Only these can end a brick:
 
-### Strict mode (on by default)
-
-These can always end a brick:
-
-* scanning a registered brick tag (in the app, or with any NFC reader HA knows about)
-* a timer running out
+* scanning a registered brick tag
+* the timer running out
 * the on-device schedule that started the brick ending
-* a Home Assistant **automation** calling `brick_hub.unbrick`
+* a **Home Assistant automation** (automations can end any brick)
 * an emergency unbrick
 
-**Manual** unbricks are refused. That covers flipping the switch in the HA
-dashboard, running a script by hand, and the app's "Unbrick" button. Home
-Assistant tells these apart by whether a logged-in person made the call.
-While you're bricked you also can't change settings, edit modes or schedules,
-or add or remove tags.
+These count as *manual* and are refused in strict mode: the app's Unbrick
+button, the "Unbrick Phone" Shortcut, and a person flipping the switch or
+running a script by hand in the HA dashboard. While bricked you also can't
+change the rules, edit modes or schedules, or add or remove tags.
+
+**Emergency unbricks.** You get 5 by default. Each one ends a brick
+immediately. Once you've used some, tap **Request reset**: they refill
+**48 hours later** (adjustable). No email, no support ticket. Asking again
+doesn't restart the countdown, and raising the number doesn't refill
+anything. Optionally the reset starts by itself when you run out. While
+bricked or while a reset is pending, the app uses Screen Time to require
+automatic date and time, so winding the clock forward can't finish the reset
+early. (This setting hasn't been tried on a real device yet.)
 
 ## What you need
 
-* **Home Assistant** 2025.1 or newer.
-* **An iPhone** on iOS 17+ and **a Mac with Xcode 16+**.
+* **An iPhone** on iOS 17+ and **a Mac with Xcode 16+** to install the app.
 * **An Apple Developer Program membership (A$149/year).** Apple only lets
-  apps use the Screen Time API with the Family Controls entitlement, and push
-  notifications need it too. A free account can't do either. Development
-  builds you install from Xcode work for a year without Apple's review. You
-  only need to request the Family Controls *distribution* entitlement if you
-  want TestFlight or the App Store.
-* **NFC tags** (optional). Any NTAG213/215/216 sticker, card or key fob works,
-  e.g. from Core Electronics, Jaycar or Amazon AU. The app reads the tag's
-  built-in ID, so nothing needs writing to it.
-* **Remote access to HA** (recommended) so the phone can sync away from home,
-  e.g. Home Assistant Cloud (Nabu Casa), Tailscale or your own reverse proxy.
-  Pushes from HA to the phone go through Apple and work regardless.
+  apps use the Screen Time API with the Family Controls entitlement, which a
+  free account can't get. Push notifications from HA need it too.
+  Development builds you install from Xcode last a year without App Store review.
+* **NFC tags** (optional): any NTAG213/215/216 sticker, card or key fob, e.g.
+  from Core Electronics, Jaycar or Amazon AU. Nothing needs writing to them.
+* **Home Assistant** 2025.1+ (optional).
 
-## Install
-
-### 1. Home Assistant integration
-
-**HACS:** add this repository as a custom repository (type *Integration*),
-install **Brick Hub**, then restart Home Assistant.
-**Manual:** copy `custom_components/brick_hub` into your HA `config/custom_components/`
-and restart.
-
-Then go to *Settings → Devices & services → Add integration → Brick Hub*
-and choose your rules: emergency unbricks, reset delay (48 h), strict mode.
-
-### 2. Push key (recommended)
-
-Push lets HA wake the phone the instant a trigger fires, even if the app has
-been swiped away.
-
-1. Go to [developer.apple.com](https://developer.apple.com/account/resources/authkeys/list) → *Keys* → **+**, and enable
-   **Apple Push Notifications service (APNs)**. Download the `.p8` file and note the **Key ID**.
-2. Note your **Team ID** (top right of the developer site).
-3. In HA: *Brick Hub → Configure*. Paste the Team ID, Key ID, your app's
-   bundle ID and the full contents of the `.p8` file.
-
-Push styles:
-* **Notification** (default, most reliable): a short banner such as
-  *"Bricked · Deep work · until 5:00 pm · by Office"*. A notification service
-  extension applies the brick before the banner appears, even if the app is closed.
-* **Silent**: no banner, but iOS may delay or drop silent pushes, especially in Low Power Mode.
-* **Off**: the phone only updates when the app is open, via long-polling or
-  background refresh.
-
-### 3. iPhone app
+## Install the app
 
 ```sh
 brew install xcodegen
@@ -121,49 +85,90 @@ xcodegen
 open BrickHub.xcodeproj
 ```
 
-Select the **BrickHub** scheme, plug in your iPhone, and run. Xcode's automatic
-signing registers the App Group, Family Controls, NFC and Push capabilities
-for the app and its three extensions. Use the same bundle ID in HA's push
-settings.
+Run the **BrickHub** scheme on your iPhone. Xcode's automatic signing sets
+up the App Group, Family Controls, NFC and Push capabilities for the app and
+its three extensions. Then:
 
-On first launch, allow Screen Time access, then:
+1. Allow Screen Time access.
+2. **Modes →** create a mode, e.g. *Deep work*: block social and games, and
+   prevent deleting apps.
+3. **Settings → Add a brick tag →** scan your sticker. Put it somewhere inconvenient.
+4. **Settings → Rules →** strict mode, number of emergency unbricks, reset delay.
 
-1. **Modes →** create a mode (e.g. *Deep work*: block social and games, and
-   prevent deleting apps). Mode names show up in HA's `select.brick_hub_mode`.
-2. **Settings → Add a brick tag →** scan your sticker. Put it somewhere inconvenient.
-3. **Settings → Connect Home Assistant →** your HA URL plus a long-lived access
-   token (HA profile → *Security* → *Long-lived access tokens*).
-4. **Settings → Enable notifications** (needed for pushes).
+That's it. Everything works from here without Home Assistant.
 
-The app also works **standalone** without HA, using tags, timers and
-schedules. In that case the rules live on the phone.
+## Add Home Assistant (optional)
 
-## Using it from Home Assistant
+### 1. Install the integration
 
-### Entities
+**HACS:** add this repository as a custom repository (type *Integration*),
+install **Brick Hub** and restart. **Manual:** copy `custom_components/brick_hub`
+into `config/custom_components/` and restart. Then go to *Settings → Devices & services →
+Add integration → Brick Hub*.
+
+### 2. Push key (recommended)
+
+Push is how HA reaches the phone instantly, even with the app closed.
+Without it, HA commands only arrive while the app is open.
+
+1. On [developer.apple.com](https://developer.apple.com/account/resources/authkeys/list),
+   go to *Keys* → **+**, enable **Apple Push Notifications service (APNs)**,
+   download the `.p8` file and note the **Key ID**.
+2. Note your **Team ID** (top right of the developer site).
+3. In HA: *Brick Hub → Configure*. Paste the Team ID, Key ID, your bundle ID
+   and the full contents of the `.p8` file.
+
+Push style **Notification** (default) is the most reliable. The app's
+notification extension runs the command the moment the push lands, then
+rewrites the banner to say what happened. For example, *"Bricked · Bedtime ·
+until 6:30 am · by Bedtime"*, or *"Didn't do that: Strict mode is on…"*.
+**Silent** shows no banner, but iOS may delay or drop silent pushes.
+
+### 3. Link the phone
+
+In the app: **Settings → Link Home Assistant**. Enter your HA URL and a
+long-lived access token (HA profile → *Security*). A URL that works away
+from home (Nabu Casa, Tailscale, a reverse proxy) lets the phone report from
+anywhere. Pushes go through Apple and reach the phone either way.
+
+The phone then appears in HA as a device with its own entities. Link more
+phones the same way.
+
+### Commands that don't arrive are dropped
+
+A command from HA is valid for **2 minutes**. If the phone doesn't get it in
+time (flight mode, no signal, push disabled and app closed), it's dropped
+rather than applied later. HA fires `brick_hub_command_result` with code
+`no_response`, so you can be notified. If the phone receives it late, the
+phone drops it itself.
+
+### Entities (per phone)
 
 | Entity | |
 |---|---|
-| `switch.brick_hub_bricked` | on = bricked. Attributes: mode, source, method |
-| `select.brick_hub_mode` | the default mode (or the active one while bricked) |
-| `button.brick_hub_emergency_unbrick` | spend one |
-| `button.brick_hub_request_emergency_reset` / `…cancel…` | the 2-day reset |
-| `sensor.brick_hub_emergency_unbricks_remaining` | |
-| `sensor.brick_hub_emergency_reset_completes` | timestamp |
-| `sensor.brick_hub_bricked_since`, `sensor.brick_hub_brick_ends` | timestamps |
-| `sensor.brick_hub_time_bricked_today`, `…_7_days`, `sensor.brick_hub_streak` | stats |
-| `sensor.brick_hub_last_change_by` | manual / tag / automation / timer / schedule / emergency |
-| `binary_sensor.brick_hub_phone_in_sync` | every phone has applied the latest state |
-| `binary_sensor.brick_hub_screen_time_access` | problem: a phone revoked Screen Time access |
+| `switch.<phone>_bricked` | the phone's real state. Flipping it *sends a command*; it only changes once the phone confirms |
+| `select.<phone>_mode` | unbricked: the mode HA uses when an automation doesn't name one. Bricked: the active mode |
+| `button.<phone>_emergency_unbrick`, `…_request_emergency_reset`, `…_cancel_emergency_reset` | |
+| `sensor.<phone>_emergency_unbricks_remaining`, `…_emergency_reset_completes` | |
+| `sensor.<phone>_bricked_since`, `…_brick_ends` | |
+| `sensor.<phone>_time_bricked_today`, `…_time_bricked_7_days`, `…_streak` | stats from the phone |
+| `sensor.<phone>_last_change_by` | manual / tag / automation / timer / schedule / emergency |
+| `sensor.<phone>_last_report` | when the phone last checked in |
+| `binary_sensor.<phone>_screen_time_access` | problem: Screen Time access was revoked |
+
+The mirror stays right between reports. A timed brick shows as ended when
+its time is up, and a reset shows as complete when it's due. The phone does
+both itself, offline, at exactly those times.
 
 ### Services
 
 ```yaml
 action: brick_hub.brick
 data:
-  mode: Deep work      # name or id; optional
-  duration: "01:30:00" # optional - auto-unbrick
-  source: Office       # optional label shown on the phone
+  device_id: abc123     # optional; default = every linked phone
+  mode: Deep work       # mode name from the app; optional
+  duration: "01:30:00"  # optional - the phone unbricks itself after this
+  source: Office        # label shown on the phone
 ```
 
 There are also `brick_hub.unbrick`, `brick_hub.toggle`, `brick_hub.emergency_unbrick`,
@@ -172,72 +177,57 @@ There are also `brick_hub.unbrick`, `brick_hub.toggle`, `brick_hub.emergency_unb
 
 ### Events
 
-* `brick_hub_state_changed` fires on every change, with `bricked`, `mode`,
-  `method`, `source`, `ends_at` and `emergency_remaining`. Use it as a trigger
-  for lights, sounds or logging.
-* `brick_hub_command_refused` fires when something was refused (`code`, `message`).
+* `brick_hub_command_result`: the phone's answer to each command (`ok`,
+  `code`, `message`, `action`, `phone`). Codes include `strict_mode`,
+  `unknown_mode`, `no_emergency_unbricks`, `expired` (arrived too late) and
+  `no_response` (never confirmed).
+* `brick_hub_state_changed`: whenever the phone reports a change (`bricked`,
+  `mode`, `method`, `source`, `ends_at`, `emergency_remaining`).
 
-### Tags from anywhere
+### NFC readers around the house
 
-Brick Hub listens to Home Assistant's `tag_scanned` event. A tag registered
-in the app also works with an **ESPHome NFC reader** (PN532/RC522) or the
-**HA Companion app's** tag scanner, because IDs are normalised: `04:A1:B2`,
-`04-a1-b2` and `04A1B2` all match. Scanning a known tag unbricks. If you're
-unbricked it bricks, unless you turn that off.
+The phone shares *hashes* of its brick tags with HA, never the tag IDs
+themselves. When any reader HA knows about scans one of them (an ESPHome
+PN532/RC522, or the HA Companion app), HA forwards it to that phone, which
+treats it like a tap. IDs are normalised: `04:A1:B2`, `04-a1-b2` and `04A1B2`
+match.
 
-See [`examples/automations.yaml`](examples/automations.yaml) for bedtime,
-leaving home, TV-on, office-light, a nag automation and more.
+See [`examples/automations.yaml`](examples/automations.yaml).
 
-### iOS Shortcuts
+## iOS Shortcuts
 
-The app adds **Brick Phone** (with mode and minutes), **Scan Brick**,
-**Unbrick Phone** (refused in strict mode) and **Is Phone Bricked**. So any iOS
-automation trigger (Focus mode, arriving somewhere, connecting to CarPlay,
-an alarm, plugging in a charger) can brick the phone too, with or without HA.
+The app adds **Brick Phone** (mode, minutes), **Scan Brick**,
+**Unbrick Phone** (manual, so refused in strict mode) and **Is Phone
+Bricked**. Any iOS automation trigger (Focus, arriving somewhere, CarPlay,
+an alarm, a charger) can brick the phone without HA.
 
-## How it stays reliable
+## Limitations
 
-* **Shields persist.** Once applied, iOS enforces them even if the app is
-  closed or the phone restarts.
-* **Push → notification service extension.** It applies the new state from
-  the push payload itself, with no network round trip, then acknowledges to HA.
-* **Long-poll** while the app is open, so changes show up within about a second.
-* **Background refresh** catches anything missed.
-* **Offline first.** If HA is unreachable, the phone applies the action with
-  an identical local engine (`ios/Shared/BrickEngine.swift` mirrors
-  `engine.py`) and queues it. Queued actions replay in order, each with a
-  unique ID so nothing applies twice. HA state never overwrites unsent local
-  changes. Emergency unbricks used offline are still counted.
-* **Timers and schedules** are also registered with iOS DeviceActivity, so the
-  phone unbricks at the right time even with no signal.
-* **The phone can't lie its way out.** HA only accepts "timer" if the timer
-  really ended, "schedule" only for a schedule-started brick, and "tag" only
-  for a registered tag. Anything else counts as manual.
-
-## Honest limitations
-
-* iOS always lets you revoke Screen Time access in Settings, which needs Face
-  ID or your passcode. Brick has the same weakness. Brick Hub can't stop it,
-  but it reports it to HA so you can automate a consequence.
+* iOS always lets you revoke Screen Time access in Settings, after Face ID or
+  your passcode. Brick has the same weakness. Brick Hub can't stop it, but HA
+  shows it (`binary_sensor.<phone>_screen_time_access`), so you can automate a
+  consequence.
+* Schedules and timers run in an extension with no network access. HA learns
+  about schedule-started bricks the next time the app runs or refreshes in
+  the background. Timer ends are worked out by HA itself.
 * Apple requires DeviceActivity intervals to be at least 15 minutes and allows
-  about 20 monitored schedules per app. Short timers are handled by
-  starting the interval early.
-* The fastest path applies the brick from the notification service extension.
-  Apple documents ManagedSettings as usable from an app's extensions, but this
-  path hasn't been tested on a real device yet. If your iOS version doesn't
-  allow it, the state is applied the next time the app opens or refreshes in
-  the background. Tapping the notification also opens the app and applies it.
-* You build and sign the app yourself. That's what makes it free of accounts
-  and trackers, but it needs the paid developer membership.
+  about 20 monitored schedules per app. Short timers are handled by starting
+  the interval early.
+* Running HA commands from the notification extension follows Apple's model
+  (ManagedSettings is usable from an app's extensions), but this hasn't been
+  tried on a real device yet. If your iOS version doesn't allow it, the
+  command runs when you tap the notification or open the app, as long as
+  that's within 2 minutes.
+* The app's screens haven't been compiled in Xcode yet, since this was built
+  without a Mac. Expect a few small fixes on the first build.
 
 ## Development
 
 ```sh
+# Home Assistant integration
 pip install -r requirements_test.txt
 pytest
-```
 
-The tests cover the state machine (`tests/test_engine.py`) and the full
-integration (`tests/test_integration.py`): services, strict mode, timers, the
-48-hour reset, tag scans, the phone API, long-polling, push fan-out and
-persistence.
+# The phone's engine: rules, emergency unbricks, reset, HA commands (runs on Linux too)
+cd ios/BrickCore && swift test
+```

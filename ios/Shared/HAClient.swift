@@ -1,57 +1,47 @@
 import Foundation
 
-struct RemoteMode: Decodable, Equatable {
-    var id: String
+/// What the phone tells Home Assistant: its real state, so HA can mirror it.
+struct PhoneReport: Encodable {
+    struct Mode: Encodable { var id: String; var name: String }
+
+    var deviceId: String
     var name: String
-}
-
-/// HA's public state: `BrickState` plus the mode list.
-struct RemoteState: Decodable {
+    var appVersion: String
+    var authorized: Bool
+    var apnsToken: String?
+    var apnsSandbox: Bool?
+    var modes: [Mode]
+    var tagHashes: [String]
+    var rules: BrickRules
     var state: BrickState
-    var modes: [RemoteMode]
-
-    init(from decoder: Decoder) throws {
-        state = try BrickState(from: decoder)
-        let c = try decoder.container(keyedBy: Keys.self)
-        modes = try c.decodeIfPresent([RemoteMode].self, forKey: .modes) ?? []
-    }
-
-    private enum Keys: String, CodingKey { case modes }
+    var stats: BrickStats
+    var results: [CommandResult]
 }
 
-private struct Envelope: Decodable {
+private struct CommandsEnvelope: Decodable {
     var ok: Bool
-    var code: String?
+    var commands: [RemoteCommand]?
     var message: String?
-    var note: String?
-    var state: RemoteState?
 }
 
 enum HAError: LocalizedError {
-    case refused(BrickRefusal, RemoteState?)
     case http(Int, String)
     case network(Error)
     case badResponse
 
     var errorDescription: String? {
         switch self {
-        case .refused(let r, _): return r.message
+        case .http(401, _): return "Home Assistant rejected the access token."
+        case .http(404, _): return "Brick Hub isn't installed in Home Assistant (or HA needs a restart)."
         case .http(let code, let msg): return "Home Assistant returned \(code): \(msg)"
         case .network(let e): return "Can't reach Home Assistant: \(e.localizedDescription)"
-        case .badResponse: return "Home Assistant sent something unexpected. Is Brick Hub installed?"
-        }
-    }
-
-    /// True when it's worth falling back to offline mode.
-    var isConnectivity: Bool {
-        switch self {
-        case .network: return true
-        case .http(let code, _): return code >= 500 || code == 404
-        default: return false
+        case .badResponse: return "Home Assistant sent something unexpected."
         }
     }
 }
 
+/// Optional link to Home Assistant. The phone works the same without it;
+/// HA only sends commands and mirrors what the phone reports.
 struct HAClient {
     var baseURL: URL
     var token: String
@@ -62,8 +52,8 @@ struct HAClient {
         return HAClient(baseURL: conn.baseURL, token: token)
     }
 
-    private func request(_ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
-                         timeout: TimeInterval = 15) async throws -> RemoteState {
+    private func send(_ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                      timeout: TimeInterval = 15) async throws -> [RemoteCommand] {
         var comps = URLComponents(url: baseURL.appendingPathComponent("api/brick_hub/\(path)"),
                                   resolvingAgainstBaseURL: false)!
         if !query.isEmpty { comps.queryItems = query }
@@ -72,7 +62,7 @@ struct HAClient {
         if let body {
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
+            req.httpBody = body
         }
         let data: Data, response: URLResponse
         do {
@@ -81,44 +71,24 @@ struct HAClient {
             throw HAError.network(error)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let env = try? JSON.snakeDecoder.decode(Envelope.self, from: data)
-        if status == 409, let env {
-            throw HAError.refused(BrickRefusal(code: env.code ?? "refused", message: env.message ?? "Refused"), env.state)
-        }
+        let env = try? JSON.snakeDecoder.decode(CommandsEnvelope.self, from: data)
         guard status == 200 else {
-            let msg = env?.message ?? String(data: data.prefix(200), encoding: .utf8) ?? ""
-            throw HAError.http(status, status == 401 ? "The access token was rejected" : msg)
+            throw HAError.http(status, env?.message ?? String(decoding: data.prefix(200), as: UTF8.self))
         }
-        guard let state = env?.state else { throw HAError.badResponse }
-        return state
+        guard let env, env.ok else { throw HAError.badResponse }
+        return env.commands ?? []
     }
 
-    func state(since: Int? = nil, wait: Int = 25) async throws -> RemoteState {
-        guard let since else { return try await request("state") }
-        return try await request(
-            "state",
-            query: [URLQueryItem(name: "since", value: String(since)), URLQueryItem(name: "wait", value: String(wait))],
-            timeout: TimeInterval(wait + 10)
-        )
+    /// Send our state (and command results); get back any waiting commands.
+    func report(_ report: PhoneReport) async throws -> [RemoteCommand] {
+        try await send("report", body: try JSON.snakeEncoder.encode(report))
     }
 
-    func command(_ cmd: PendingCommand, deviceId: String) async throws -> RemoteState {
-        var body: [String: Any] = [
-            "action": cmd.action.rawValue,
-            "method": cmd.method.rawValue,
-            "event_id": cmd.id,
-            "occurred_at": ISO8601.string(cmd.occurredAt),
-            "device_id": deviceId,
-        ]
-        if let v = cmd.modeId { body["mode_id"] = v }
-        if let v = cmd.durationMinutes { body["duration_minutes"] = v }
-        if let v = cmd.tagId { body["tag_id"] = v }
-        if let v = cmd.tagName { body["tag_name"] = v }
-        if let v = cmd.source { body["source"] = v }
-        return try await request("command", body: body)
-    }
-
-    func device(_ body: [String: Any]) async throws -> RemoteState {
-        try await request("device", body: body)
+    /// Long-poll for commands while the app is open.
+    func commands(deviceId: String, wait: Int = 25) async throws -> [RemoteCommand] {
+        try await send("commands",
+                       query: [URLQueryItem(name: "device_id", value: deviceId),
+                               URLQueryItem(name: "wait", value: String(wait))],
+                       timeout: TimeInterval(wait + 10))
     }
 }

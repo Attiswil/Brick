@@ -1,25 +1,29 @@
-"""Integration tests: services, entities, tags, timers and the phone API."""
+"""Integration tests: HA as a remote control + mirror for phones."""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    async_capture_events,
     async_fire_time_changed,
 )
 
+from custom_components.brick_hub.apns import ApnsClient, PushResult
 from custom_components.brick_hub.const import DOMAIN
+from custom_components.brick_hub.tags import hash_tag
 
-SWITCH = "switch.brick_hub_bricked"
-REMAINING = "sensor.brick_hub_emergency_unbricks_remaining"
+SWITCH = "switch.will_s_iphone_bricked"
 
 
 @pytest.fixture(autouse=True)
@@ -31,219 +35,228 @@ async def auto_enable_custom_integrations(enable_custom_integrations):
 @pytest.fixture
 async def entry(hass: HomeAssistant) -> MockConfigEntry:
     assert await async_setup_component(hass, "http", {})
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        unique_id=DOMAIN,
-        data={"emergency_max": 2, "reset_hours": 48, "strict": True},
-    )
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, data={})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     return entry
 
 
+def report(**state) -> dict:
+    """What the iOS app sends (PhoneReport, snake_case)."""
+    return {
+        "device_id": "phone-1",
+        "name": "Will's iPhone",
+        "app_version": "0.2.0",
+        "authorized": True,
+        "modes": [{"id": "m1", "name": "Deep work"}, {"id": "m2", "name": "Bedtime"}],
+        "tag_hashes": [hash_tag("04:AB:CD:EF")],
+        "rules": {"strict": True, "emergency_max": 5, "reset_hours": 48,
+                  "auto_request_reset": False, "tag_toggles": True},
+        "state": {"revision": 1, "bricked": False, "emergency_remaining": 5, **state},
+        "stats": {"today_seconds": 600, "week_seconds": 7200, "streak_days": 3,
+                  "sessions_total": 9, "longest_session_seconds": 5400},
+        "results": [],
+    }
+
+
+@pytest.fixture
+async def client(hass: HomeAssistant, entry, hass_client):
+    client = await hass_client()
+    resp = await client.post("/api/brick_hub/report", json=report())
+    assert (await resp.json()) == {"ok": True, "commands": []}
+    await hass.async_block_till_done()
+    return client
+
+
+async def commands(client) -> list[dict]:
+    resp = await client.get("/api/brick_hub/commands?device_id=phone-1")
+    return (await resp.json())["commands"]
+
+
 async def test_config_flow(hass: HomeAssistant) -> None:
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
-    assert result["type"] == "form"
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        {"emergency_max": 5, "reset_hours": 48, "strict": True,
-         "auto_request_reset": False, "tag_toggles": True},
-    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
     assert result["type"] == "create_entry"
-    assert result["data"]["emergency_max"] == 5
 
 
-async def test_automation_bricks_and_strict_blocks_manual(
-    hass: HomeAssistant, entry, hass_admin_user
-) -> None:
-    # No user on the context = automation.
-    await hass.services.async_call(
-        DOMAIN, "brick", {"source": "Bedtime", "duration": {"minutes": 30}},
-        blocking=True, context=Context(),
-    )
+async def test_phone_report_creates_mirror_entities(hass: HomeAssistant, client) -> None:
+    assert hass.states.get(SWITCH).state == "off"
+    assert hass.states.get("select.will_s_iphone_mode").state == "Deep work"
+    assert hass.states.get("sensor.will_s_iphone_streak").state == "3"
+    assert hass.states.get("sensor.will_s_iphone_emergency_unbricks_remaining").state == "5"
+    assert hass.states.get("binary_sensor.will_s_iphone_screen_time_access").state == "off"
+    now = dt_util.utcnow()
+    await client.post("/api/brick_hub/report", json=report(
+        revision=2, bricked=True, mode_id="m2", source="Brick tag", last_method="tag",
+        bricked_since=(now - timedelta(minutes=5)).isoformat(),
+    ))
+    await hass.async_block_till_done()
     state = hass.states.get(SWITCH)
     assert state.state == "on"
-    assert state.attributes["source"] == "Bedtime"
+    assert state.attributes["mode"] == "Bedtime"
+    assert state.attributes["strict"] is True
+    assert hass.states.get("select.will_s_iphone_mode").state == "Bedtime"
 
-    # A person flipping the switch in strict mode is refused.
-    with pytest.raises(HomeAssistantError, match="Strict mode"):
-        await hass.services.async_call(
-            "switch", "turn_off", {"entity_id": SWITCH},
-            blocking=True, context=Context(user_id=hass_admin_user.id),
-        )
-    assert hass.states.get(SWITCH).state == "on"
 
-    # Options are locked while bricked.
-    result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert result["type"] == "abort"
-    assert result["reason"] == "locked_while_bricked"
-
-    # An automation may unbrick.
-    await hass.services.async_call(DOMAIN, "unbrick", {}, blocking=True, context=Context())
+async def test_automation_sends_command_and_phone_reports_result(
+    hass: HomeAssistant, client
+) -> None:
+    results = async_capture_events(hass, "brick_hub_command_result")
+    await hass.services.async_call(
+        DOMAIN, "brick", {"mode": "bedtime", "duration": {"minutes": 90}, "source": "Bedtime"},
+        blocking=True, context=Context(),
+    )
+    [cmd] = await commands(client)
+    assert cmd["action"] == "brick"
+    assert cmd["method"] == "automation"
+    assert cmd["mode_id"] == "m2"  # resolved by name, case-insensitively
+    assert cmd["duration_minutes"] == 90
+    assert cmd["source"] == "Bedtime"
+    # HA doesn't pretend: the switch only flips when the phone says so.
     assert hass.states.get(SWITCH).state == "off"
 
-
-async def test_timer_unbricks(
-    hass: HomeAssistant, entry, freezer: FrozenDateTimeFactory
-) -> None:
-    await hass.services.async_call(
-        DOMAIN, "brick", {"duration": {"minutes": 10}}, blocking=True
-    )
+    payload = report(revision=2, bricked=True, mode_id="m2")
+    payload["results"] = [{"id": cmd["id"], "ok": True, "changed": True}]
+    resp = await client.post("/api/brick_hub/report", json=payload)
+    assert (await resp.json())["commands"] == []
+    await hass.async_block_till_done()
     assert hass.states.get(SWITCH).state == "on"
+    assert results[-1].data["ok"] is True and results[-1].data["action"] == "brick"
+    assert await commands(client) == []
+
+
+async def test_dashboard_is_manual_and_refusal_is_reported(
+    hass: HomeAssistant, client, hass_admin_user
+) -> None:
+    results = async_capture_events(hass, "brick_hub_command_result")
+    await hass.services.async_call(
+        "switch", "turn_off", {"entity_id": SWITCH},
+        blocking=True, context=Context(user_id=hass_admin_user.id),
+    )
+    [cmd] = await commands(client)
+    assert cmd["method"] == "manual"
+    payload = report()
+    payload["results"] = [{"id": cmd["id"], "ok": False, "code": "strict_mode",
+                           "message": "Strict mode is on"}]
+    await client.post("/api/brick_hub/report", json=payload)
+    await hass.async_block_till_done()
+    assert results[-1].data["code"] == "strict_mode"
+    assert hass.states.get(SWITCH).attributes["last_command"]["code"] == "strict_mode"
+
+
+async def test_undelivered_commands_are_dropped(
+    hass: HomeAssistant, client, freezer: FrozenDateTimeFactory
+) -> None:
+    results = async_capture_events(hass, "brick_hub_command_result")
+    await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
+    assert len(await commands(client)) == 1
+    freezer.tick(timedelta(seconds=121))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert await commands(client) == []
+    assert results[-1].data["code"] == "no_response"
+
+
+async def test_long_poll_wakes_on_command(hass: HomeAssistant, client) -> None:
+    task = asyncio.create_task(client.get("/api/brick_hub/commands?device_id=phone-1&wait=20"))
+    await asyncio.sleep(0.2)
+    assert not task.done()
+    await hass.services.async_call(DOMAIN, "unbrick", {}, blocking=True)
+    resp = await asyncio.wait_for(task, 5)
+    [cmd] = (await resp.json())["commands"]
+    assert cmd["action"] == "unbrick" and cmd["method"] == "automation"
+
+
+async def test_tag_scan_forwarded_to_owning_phone(hass: HomeAssistant, client) -> None:
+    hass.bus.async_fire("tag_scanned", {"tag_id": "nope"})
+    await hass.async_block_till_done()
+    assert await commands(client) == []
+    hass.bus.async_fire("tag_scanned", {"tag_id": "04-ab-cd-ef"})  # ESPHome-style
+    await hass.async_block_till_done()
+    [cmd] = await commands(client)
+    assert cmd["action"] == "toggle" and cmd["method"] == "tag"
+    assert cmd["tag_id"] == "04-ab-cd-ef"
+
+
+async def test_target_specific_phone(hass: HomeAssistant, client) -> None:
+    second = report()
+    second.update(device_id="phone-2", name="Partner's iPhone")
+    await client.post("/api/brick_hub/report", json=second)
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "phone-2")})
+    await hass.services.async_call(
+        DOMAIN, "brick", {"device_id": device.id}, blocking=True
+    )
+    assert await commands(client) == []
+    resp = await client.get("/api/brick_hub/commands?device_id=phone-2")
+    assert len((await resp.json())["commands"]) == 1
+
+
+async def test_mirror_derives_timer_and_reset(
+    hass: HomeAssistant, client, freezer: FrozenDateTimeFactory
+) -> None:
+    now = dt_util.utcnow()
+    await client.post("/api/brick_hub/report", json=report(
+        revision=3, bricked=True, bricked_since=now.isoformat(),
+        ends_at=(now + timedelta(minutes=10)).isoformat(),
+        emergency_remaining=0, emergency_reset_at=(now + timedelta(minutes=20)).isoformat(),
+    ))
+    await hass.async_block_till_done()
+    assert hass.states.get(SWITCH).state == "on"
+    # The phone's own timer ends the brick even if it can't report in time.
     freezer.tick(timedelta(minutes=10, seconds=1))
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert hass.states.get(SWITCH).state == "off"
-    assert hass.states.get("sensor.brick_hub_last_change_by").state == "timer"
+    freezer.tick(timedelta(minutes=10))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass.states.get("sensor.will_s_iphone_emergency_unbricks_remaining").state == "5"
 
 
-async def test_tag_scanned_toggles(hass: HomeAssistant, entry) -> None:
+async def test_select_sets_mode_for_ha_bricks(hass: HomeAssistant, client) -> None:
     await hass.services.async_call(
-        DOMAIN, "add_tag", {"tag_id": "04:AB:CD:EF", "name": "Desk"}, blocking=True
+        "select", "select_option",
+        {"entity_id": "select.will_s_iphone_mode", "option": "Bedtime"}, blocking=True,
     )
-    hass.bus.async_fire("tag_scanned", {"tag_id": "04-ab-cd-ef"})
-    await hass.async_block_till_done()
-    assert hass.states.get(SWITCH).state == "on"
-    hass.bus.async_fire("tag_scanned", {"tag_id": "nope"})
-    await hass.async_block_till_done()
-    assert hass.states.get(SWITCH).state == "on"
-    hass.bus.async_fire("tag_scanned", {"tag_id": "04ABCDEF"})
-    await hass.async_block_till_done()
-    assert hass.states.get(SWITCH).state == "off"
+    assert hass.states.get("select.will_s_iphone_mode").state == "Bedtime"
+    await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
+    [cmd] = await commands(client)
+    assert cmd["mode_id"] == "m2"
 
 
-async def test_emergency_and_two_day_reset(
-    hass: HomeAssistant, entry, freezer: FrozenDateTimeFactory
-) -> None:
-    for _ in range(2):
+async def test_no_phones_is_a_clear_error(hass: HomeAssistant, entry) -> None:
+    with pytest.raises(ServiceValidationError, match="No phones are linked"):
         await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
-        await hass.services.async_call(
-            "button", "press",
-            {"entity_id": "button.brick_hub_emergency_unbrick"}, blocking=True,
-        )
-        assert hass.states.get(SWITCH).state == "off"
-    assert hass.states.get(REMAINING).state == "0"
-
-    await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
-    with pytest.raises(HomeAssistantError, match="No emergency unbricks left"):
-        await hass.services.async_call(DOMAIN, "emergency_unbrick", {}, blocking=True)
-    await hass.services.async_call(DOMAIN, "request_emergency_reset", {}, blocking=True)
-    reset_at = dt_util.parse_datetime(
-        hass.states.get("sensor.brick_hub_emergency_reset_completes").state
-    )
-    assert abs(reset_at - dt_util.utcnow() - timedelta(hours=48)) < timedelta(seconds=5)
-
-    freezer.tick(timedelta(hours=47))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done()
-    assert hass.states.get(REMAINING).state == "0"
-    freezer.tick(timedelta(hours=1, seconds=1))
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done()
-    assert hass.states.get(REMAINING).state == "2"
 
 
-async def test_phone_api(hass: HomeAssistant, entry, hass_client) -> None:
-    client = await hass_client()
-    resp = await client.post(
-        "/api/brick_hub/device",
-        json={
-            "device_id": "iphone-1", "name": "Will's iPhone",
-            "modes": [{"id": "m1", "name": "Deep work"}, {"id": "m2", "name": "Bedtime"}],
-            "authorized": True, "applied_revision": 0,
-        },
-    )
-    body = await resp.json()
-    assert body["ok"] and len(body["state"]["modes"]) == 2
-    assert hass.states.get("select.brick_hub_mode").state == "Deep work"
-
-    # HA brick by mode *name*.
-    await hass.services.async_call(DOMAIN, "brick", {"mode": "Bedtime"}, blocking=True)
-    resp = await client.get("/api/brick_hub/state")
-    state = (await resp.json())["state"]
-    assert state["bricked"] and state["mode_id"] == "m2"
-    assert hass.states.get("binary_sensor.brick_hub_phone_in_sync").state == "off"
-
-    # Phone acks the revision.
-    await client.post(
-        "/api/brick_hub/device",
-        json={"device_id": "iphone-1", "applied_revision": state["revision"]},
-    )
-    assert hass.states.get("binary_sensor.brick_hub_phone_in_sync").state == "on"
-
-    # A phone claiming "automation" is downgraded to manual -> strict refuses.
-    resp = await client.post(
-        "/api/brick_hub/command",
-        json={"action": "unbrick", "method": "automation", "device_id": "iphone-1"},
-    )
-    assert resp.status == 409
-    assert (await resp.json())["code"] == "strict_mode"
-
-    # A phone claiming "timer" before the timer ends is also manual.
-    resp = await client.post(
-        "/api/brick_hub/command",
-        json={"action": "unbrick", "method": "timer", "device_id": "iphone-1"},
-    )
-    assert resp.status == 409
-
-    # Emergency from the phone, deduplicated by event id.
-    for _ in range(2):
-        resp = await client.post(
-            "/api/brick_hub/command",
-            json={"action": "emergency_unbrick", "event_id": "e1", "device_id": "iphone-1"},
-        )
-        assert resp.status == 200
-    state = (await resp.json())["state"]
-    assert not state["bricked"] and state["emergency_remaining"] == 1
-
-
-async def test_long_poll_wakes(hass: HomeAssistant, entry, hass_client) -> None:
-    client = await hass_client()
-    rev = (await (await client.get("/api/brick_hub/state")).json())["state"]["revision"]
-    task = asyncio.create_task(client.get(f"/api/brick_hub/state?since={rev}&wait=20"))
-    await asyncio.sleep(0.2)
-    assert not task.done()
-    await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
-    resp = await task
-    assert (await resp.json())["state"]["revision"] == rev + 1
-
-
-async def test_state_persists(hass: HomeAssistant, entry) -> None:
-    await hass.services.async_call(DOMAIN, "brick", {}, blocking=True)
-    assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
-    assert hass.states.get(SWITCH).state == "on"
-
-
-async def test_push_sent_to_other_devices(hass: HomeAssistant, entry, hass_client) -> None:
-    from unittest.mock import AsyncMock, patch
-
-    from custom_components.brick_hub.apns import ApnsClient, PushResult
-
+async def test_push_carries_command_and_expiry(hass: HomeAssistant, entry, client) -> None:
     hub = entry.runtime_data
     hub.apns = ApnsClient(hass, "TEAM", "KEY", "unused", "com.example.brickhub")
-    client = await hass_client()
-    for dev, token in (("a", "tok-a"), ("b", "tok-b")):
-        await client.post(
-            "/api/brick_hub/device",
-            json={"device_id": dev, "apns_token": token, "apns_sandbox": True},
-        )
-    send = AsyncMock(
-        side_effect=lambda token, payload, **kw: PushResult(
-            410 if token == "tok-b" else 200, "Unregistered" if token == "tok-b" else None
-        )
-    )
+    with_token = report()
+    with_token.update(apns_token="tok", apns_sandbox=True)
+    await client.post("/api/brick_hub/report", json=with_token)
+    send = AsyncMock(return_value=PushResult(200))
     with patch.object(hub.apns, "send", send):
-        # Phone "a" bricks itself: only "b" should be pushed.
-        await client.post(
-            "/api/brick_hub/command", json={"action": "brick", "device_id": "a"}
-        )
+        await hass.services.async_call(DOMAIN, "brick", {"mode": "Deep work"}, blocking=True)
         await hass.async_block_till_done()
-    assert [c.args[0] for c in send.call_args_list] == ["tok-b"]
     payload = send.call_args.args[1]
-    assert payload["brick"]["bricked"] is True
+    assert payload["brick_cmd"]["mode_id"] == "m1"
     assert payload["aps"]["mutable-content"] == 1
     assert send.call_args.kwargs["sandbox"] is True
-    # Dead token is dropped.
-    assert "apns_token" not in hub.devices["b"]
+    expires = send.call_args.kwargs["expires_at"]
+    assert 115 <= expires - dt_util.utcnow().timestamp() <= 121
+
+
+async def test_phones_persist(hass: HomeAssistant, entry, client) -> None:
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass.states.get(SWITCH) is not None
+    assert hass.states.get("select.will_s_iphone_mode").state == "Deep work"
+
+
+async def test_tag_hash_matches_ios() -> None:
+    # Same value asserted in ios/BrickCore/Tests (TagHash.swift).
+    assert hash_tag("04:a1:b2:c3") == (
+        "27e80505ce6eaff0769f20aff4531f6758247ca9c2b3821e73caf386695bcc8b"
+    )

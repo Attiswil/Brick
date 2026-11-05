@@ -1,6 +1,7 @@
 # Example Home Assistant automations for Brick Hub.
-# Paste into automations.yaml (or recreate in the UI). Entity ids assume the
-# default names; adjust person./media_player./etc to your own.
+# Entity ids follow your phone's name: a phone called "Will's iPhone" gets
+# switch.will_s_iphone_bricked etc. Services without device_id target every
+# linked phone.
 
 - alias: "Brick: bedtime"
   triggers:
@@ -10,10 +11,10 @@
     - action: brick_hub.brick
       data:
         mode: Bedtime          # a mode name from the iPhone app
-        duration: "09:00:00"   # auto-unbrick at 6:30
+        duration: "09:00:00"   # the phone unbricks itself at 6:30, even offline
         source: Bedtime
 
-- alias: "Brick: leaving home for the gym"
+- alias: "Brick: arriving at the gym"
   triggers:
     - trigger: zone
       entity_id: person.me
@@ -35,21 +36,19 @@
     - action: brick_hub.brick
       data:
         source: Movie night
+
 - alias: "Unbrick: TV off"
   triggers:
     - trigger: state
       entity_id: media_player.living_room_tv
       to: "off"
-  conditions:
-    # Only undo what the TV automation did.
-    - condition: state
-      entity_id: switch.brick_hub_bricked
-      attribute: source
-      state: Movie night
   actions:
-    - action: brick_hub.unbrick   # automations may unbrick even in strict mode
+    # Automations can end any brick, even in strict mode.
+    - action: brick_hub.unbrick
+      data:
+        source: TV off
 
-- alias: "Brick: focus time while the office light is on"
+- alias: "Brick: only one phone, while the office light is on"
   triggers:
     - trigger: state
       entity_id: light.office
@@ -57,24 +56,38 @@
   actions:
     - action: brick_hub.brick
       data:
+        device_id: REPLACE_WITH_YOUR_PHONE_DEVICE_ID   # pick it in the UI editor
         mode: Deep work
         duration: "01:30:00"
         source: Office
 
-# A cheap ESPHome NFC reader (PN532/RC522) by the front door works as a
-# "brick" - register its tag ids with brick_hub.add_tag or scan the same tag
-# with the iPhone app. No automation needed: Brick Hub listens to tag_scanned.
+# An ESPHome NFC reader (PN532/RC522) by the front door works as a brick
+# with no automation: Brick Hub forwards scans of your phone's brick tags to
+# the phone. To use a tag you haven't scanned with the phone, call
+# brick_hub.add_tag with the reader's tag id (while unbricked).
+
+- alias: "Brick Hub: tell me when the phone refuses or misses a command"
+  triggers:
+    - trigger: event
+      event_type: brick_hub_command_result
+      event_data:
+        ok: false
+  actions:
+    - action: notify.notify
+      data:
+        title: Brick Hub
+        message: "{{ trigger.event.data.phone }}: {{ trigger.event.data.message }}"
 
 - alias: "Brick Hub: nag if Screen Time access is revoked"
   triggers:
     - trigger: state
-      entity_id: binary_sensor.brick_hub_screen_time_access
+      entity_id: binary_sensor.will_s_iphone_screen_time_access
       to: "on"
   actions:
     - action: notify.notify
       data:
         title: Brick Hub
-        message: Screen Time access was turned off on your phone. Bricks won't work until it's back on.
+        message: Screen Time access was turned off on the phone. Bricks won't work until it's back on.
 
 - alias: "Brick Hub: lights flash when bricked"
   triggers:

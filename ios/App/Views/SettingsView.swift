@@ -9,14 +9,14 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                homeAssistantSection
+                RulesSection()
                 tagsSection
-                rulesSection
+                homeAssistantSection
                 permissionsSection
                 Section {
                     LabeledContent("Version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")
                 } footer: {
-                    Text("No AI, no accounts, no analytics. Your data stays on your phone and your own Home Assistant.")
+                    Text("No AI, no accounts, no analytics. Everything runs on this phone; Home Assistant is optional.")
                 }
             }
             .navigationTitle("Settings")
@@ -27,32 +27,6 @@ struct SettingsView: View {
             } message: {
                 Text("Any NFC sticker, card or key fob works. Next you'll hold it to the top of your iPhone.")
             }
-        }
-    }
-
-    @ViewBuilder private var homeAssistantSection: some View {
-        Section {
-            if let conn = model.connection {
-                LabeledContent("Server", value: conn.baseURL.host() ?? conn.baseURL.absoluteString)
-                LabeledContent("This phone", value: conn.deviceName)
-                if let last = model.lastSync {
-                    LabeledContent("Last sync") { Text(last, style: .relative) }
-                }
-                if model.pendingCount > 0 {
-                    LabeledContent("Queued offline", value: "\(model.pendingCount)")
-                }
-                Button("Sync now") { Task { await model.syncNow() } }
-                Button("Disconnect", role: .destructive) { Task { await model.disconnect() } }
-                    .disabled(model.state.bricked)
-            } else {
-                NavigationLink("Connect Home Assistant") { ConnectView() }
-            }
-        } header: {
-            Text("Home Assistant")
-        } footer: {
-            Text(model.isConnected
-                 ? "Any Home Assistant trigger can brick this phone. Rules (strict mode, emergency unbricks) are managed in the Brick Hub integration."
-                 : "Optional. Without it Brick Hub works standalone with tags, timers and schedules.")
         }
     }
 
@@ -73,23 +47,29 @@ struct SettingsView: View {
         } footer: {
             Text(model.state.bricked
                  ? "Tags can't be added or removed while bricked."
-                 : "Put a tag somewhere inconvenient - the walk is the point. Tags also work with ESPHome NFC readers and the Home Assistant app.")
+                 : "Put a tag somewhere inconvenient - the walk is the point. If Home Assistant is linked, the same tag also works on an ESPHome NFC reader.")
         }
     }
 
-    @ViewBuilder private var rulesSection: some View {
+    @ViewBuilder private var homeAssistantSection: some View {
         Section {
-            if model.isConnected {
-                LabeledContent("Strict mode", value: model.state.strict ? "On" : "Off")
-                LabeledContent("Emergency unbricks", value: "\(model.state.emergencyMax)")
-                LabeledContent("Reset takes", value: "\(Int(model.state.resetHours)) hours")
+            if let conn = model.connection {
+                LabeledContent("Server", value: conn.baseURL.host() ?? conn.baseURL.absoluteString)
+                LabeledContent("This phone", value: conn.deviceName)
+                if let last = model.lastReport {
+                    LabeledContent("Last update sent") { Text(last, style: .relative) }
+                }
+                Button("Send update now") { Task { await model.syncNow() } }
+                Button("Unlink", role: .destructive) { Task { await model.disconnect() } }
             } else {
-                StandaloneRules()
+                NavigationLink("Link Home Assistant") { ConnectView() }
             }
         } header: {
-            Text("Rules")
+            Text("Home Assistant (optional)")
         } footer: {
-            Text("Strict mode means only a brick tag, a timer, a schedule or an emergency unbrick can end a brick. Emergency unbricks refill only after a reset, which takes the full delay.")
+            Text(model.isConnected
+                 ? "Home Assistant automations can brick or unbrick this phone and see its state. The phone still makes every decision, so it works the same when HA is down."
+                 : "Link it to let any Home Assistant trigger brick this phone. Not needed for anything else.")
         }
     }
 
@@ -104,27 +84,31 @@ struct SettingsView: View {
     }
 }
 
-private struct StandaloneRules: View {
+/// Rules live on the phone. Locked while bricked.
+private struct RulesSection: View {
     @EnvironmentObject private var model: AppModel
-    @State private var strict = true
-    @State private var emergencyMax = 5
-    @State private var resetHours = 48.0
+    @State private var draft = BrickRules()
 
     var body: some View {
-        Group {
-            Toggle("Strict mode", isOn: $strict)
-            Stepper("Emergency unbricks: \(emergencyMax)", value: $emergencyMax, in: 0...20)
-            Stepper("Reset takes \(Int(resetHours)) hours", value: $resetHours, in: 1...336, step: 1)
-            Button("Save rules") {
-                model.updateStandalone(emergencyMax: emergencyMax, resetHours: resetHours, strict: strict)
+        Section {
+            Toggle("Strict mode", isOn: $draft.strict)
+            Stepper("Emergency unbricks: \(draft.emergencyMax)", value: $draft.emergencyMax, in: 0...20)
+            Stepper("Reset takes \(Int(draft.resetHours)) hours", value: $draft.resetHours, in: 1...336, step: 1)
+            Toggle("Start the reset automatically when I run out", isOn: $draft.autoRequestReset)
+            Toggle("Scanning a tag while unbricked bricks me", isOn: $draft.tagToggles)
+            if draft != model.rules {
+                Button("Save rules") { model.save(rules: draft) }
             }
+        } header: {
+            Text("Rules")
+        } footer: {
+            Text(model.state.bricked
+                 ? "Rules are locked while you're bricked."
+                 : "Strict mode: only a brick tag, a timer, a schedule, a Home Assistant automation or an emergency unbrick can end a brick. Raising the number of emergency unbricks doesn't refill them - only a reset does.")
         }
         .disabled(model.state.bricked)
-        .onAppear {
-            strict = model.state.strict
-            emergencyMax = model.state.emergencyMax
-            resetHours = model.state.resetHours
-        }
+        .onAppear { draft = model.rules }
+        .onChange(of: model.rules) { _, rules in draft = rules }
     }
 }
 
@@ -145,12 +129,12 @@ struct ConnectView: View {
                 SecureField("Long-lived access token", text: $token)
                 TextField("Name for this phone", text: $name)
             } footer: {
-                Text("Use a URL that works away from home too (e.g. Nabu Casa or your own reverse proxy). Create a token in Home Assistant under your profile → Security → Long-lived access tokens. The Brick Hub integration must be installed first.")
+                Text("Install the Brick Hub integration in Home Assistant first. Create a token under your HA profile → Security → Long-lived access tokens. A URL that works away from home (Nabu Casa, Tailscale, a reverse proxy) lets the phone report its state from anywhere.")
             }
             Button {
                 Task { if await model.connect(url: url, token: token, deviceName: name) { dismiss() } }
             } label: {
-                if model.busy { ProgressView() } else { Text("Connect") }
+                if model.busy { ProgressView() } else { Text("Link") }
             }
             .disabled(url.isEmpty || token.isEmpty || model.busy)
         }

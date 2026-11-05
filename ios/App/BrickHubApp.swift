@@ -17,18 +17,18 @@ struct BrickHubApp: App {
             switch phase {
             case .active:
                 model.reload()
-                model.startForegroundSync()
+                model.startForegroundLoop()
             case .background:
-                model.stopForegroundSync()
+                model.stopForegroundLoop()
                 AppModel.scheduleBackgroundRefresh()
             default:
                 break
             }
         }
         .backgroundTask(.appRefresh(AppModel.refreshTaskId)) {
-            // Opportunistic catch-up: replay offline commands, pull HA state.
-            _ = try? await BrickSync.shared.refresh()
-            await BrickSync.shared.heartbeat()
+            // Opportunistic: end due timers, report to HA (if linked).
+            LocalRunner.tick()
+            await BrickSync.shared.report()
             await AppModel.scheduleBackgroundRefresh()
         }
     }
@@ -56,7 +56,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let store = SharedStore.shared
         guard store.apnsToken != token else { return }
         store.apnsToken = token
-        Task { await BrickSync.shared.heartbeat() }
+        Task { await BrickSync.shared.report() }
     }
 
     func application(_ application: UIApplication,
@@ -67,7 +67,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     /// Silent ("background") pushes land here.
     func application(_ application: UIApplication,
                      didReceiveRemoteNotification userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
-        await BrickSync.shared.handlePush(userInfo)
+        _ = await BrickSync.shared.handlePush(userInfo)
         await MainActor.run { AppModel.shared.reload() }
         return .newData
     }

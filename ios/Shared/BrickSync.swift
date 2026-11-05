@@ -1,15 +1,63 @@
 import Foundation
 
-/// The one place that changes brick state on the phone. Used by the app,
-/// App Intents, background refresh and the notification extension.
-///
-/// Rules:
-/// * Connected: commands go to Home Assistant, which is the source of truth.
-/// * Can't reach HA: the local engine applies the command (same rules) and it
-///   is queued; queued commands are replayed, in order, before anything else.
-/// * Never adopt HA's state while local commands are still unsent - otherwise
-///   an offline brick could be undone by a stale push.
-/// * Not configured for HA at all: fully standalone.
+/// Network-free, synchronous core used by everything - the app, Shortcuts,
+/// and the extensions (which have no network). The phone is always the
+/// source of truth: every change happens here first, then (optionally) gets
+/// reported to Home Assistant.
+enum LocalRunner {
+    /// Run a command on the phone. Throws `BrickRefusal` if the rules say no.
+    @discardableResult
+    static func run(_ cmd: BrickCommand, store: SharedStore = .shared) throws -> Bool {
+        let modes = store.modes
+        var changed = false
+        let book = try store.updateBook { book -> LocalBook in
+            changed = try BrickEngine.apply(cmd, to: &book)
+            return book
+        }
+        ShieldController.sync(book, modes: modes)
+        if changed { store.needsReport = true }
+        return changed
+    }
+
+    /// Run commands that came from Home Assistant.
+    static func handle(_ commands: [RemoteCommand], store: SharedStore = .shared) -> [CommandResult] {
+        guard !commands.isEmpty else { return [] }
+        let modes = store.modes
+        let names = store.modeNames
+        let (book, results) = store.updateBook { book -> (LocalBook, [CommandResult]) in
+            let results = commands.map { BrickEngine.handle($0, book: &book, modes: names) }
+            return (book, results)
+        }
+        ShieldController.sync(book, modes: modes)
+        let fresh = results.filter { $0.code != "duplicate" }
+        if !fresh.isEmpty {
+            store.unsentResults = store.unsentResults + fresh
+            store.needsReport = true
+        }
+        return results
+    }
+
+    /// End timers and complete resets that are due.
+    static func tick(store: SharedStore = .shared) {
+        let modes = store.modes
+        var changed = false
+        let book = store.updateBook { book -> LocalBook in
+            changed = BrickEngine.tick(&book)
+            return book
+        }
+        ShieldController.sync(book, modes: modes)
+        if changed { store.needsReport = true }
+    }
+
+    static func setRules(_ rules: BrickRules, store: SharedStore = .shared) throws {
+        try store.updateBook { try BrickEngine.setRules(rules, book: &$0) }
+        store.needsReport = true
+    }
+}
+
+/// Talks to Home Assistant, if one is connected. Nothing here is needed for
+/// the phone to brick and unbrick - it only delivers HA's commands and
+/// reports the phone's state back.
 actor BrickSync {
     static let shared = BrickSync()
     private let store: SharedStore
@@ -18,178 +66,99 @@ actor BrickSync {
         self.store = store
     }
 
-    enum Outcome {
-        case online
-        case offline  // applied locally, queued for HA
-        case standalone
+    var isConnected: Bool { store.connection != nil }
+
+    /// Run a command locally, then tell HA in the background. Never waits
+    /// for the network: the phone decides, instantly, online or not.
+    func perform(_ cmd: BrickCommand) throws {
+        try LocalRunner.run(cmd, store: store)
+        Task { await self.report() }
     }
 
-    // MARK: Commands
-
-    @discardableResult
-    func perform(_ cmd: PendingCommand) async throws -> Outcome {
-        guard let client = HAClient.current(store) else {
-            try applyLocally(cmd)
-            return .standalone
-        }
-        await flushPending(client)
-        if store.pending.isEmpty {
+    /// Report our state to HA and run any commands it has waiting.
+    /// Best effort: failures just leave `needsReport` set for next time.
+    func report() async {
+        guard let client = HAClient.current(store) else { return }
+        LocalRunner.tick(store: store)
+        // Report; if HA hands back commands, run them and report their
+        // results too (bounded, in case commands keep arriving).
+        for _ in 0..<3 {
+            let results = store.unsentResults
             do {
-                let remote = try await client.command(cmd, deviceId: store.deviceId)
-                // Keep tag hashes locally so offline tag-unbricks still work.
-                if cmd.action == .registerTag || cmd.action == .removeTag {
-                    store.updateBook { book in _ = try? BrickEngine.apply(cmd, to: &book) }
-                }
-                await adopt(remote, client: client)
-                return .online
-            } catch HAError.refused(let refusal, let remote) {
-                if let remote { await adopt(remote, client: client) }
-                throw refusal
-            } catch let error as HAError where error.isConnectivity {
-                // fall through to offline
-            }
-        }
-        if cmd.action == .registerTag || cmd.action == .removeTag {
-            throw BrickRefusal(code: "offline", message: "Connect to Home Assistant to change brick tags.")
-        }
-        try applyLocally(cmd)
-        store.enqueue(cmd)
-        return .offline
-    }
-
-    private func applyLocally(_ cmd: PendingCommand) throws {
-        let modes = store.modes
-        let book = try store.updateBook { book -> LocalBook in
-            BrickEngine.tick(&book)
-            try BrickEngine.apply(cmd, to: &book)
-            book.state.stats = BrickEngine.stats(book)
-            return book
-        }
-        ShieldController.sync(book, modes: modes)
-    }
-
-    // MARK: Sync
-
-    /// Sends queued offline commands in order. Refusals are dropped (HA said
-    /// no - its state wins); connectivity errors stop the flush.
-    func flushPending(_ client: HAClient? = nil) async {
-        guard let client = client ?? HAClient.current(store) else { return }
-        var queue = store.pending
-        var lastRemote: RemoteState?
-        while let cmd = queue.first {
-            do {
-                lastRemote = try await client.command(cmd, deviceId: store.deviceId)
-            } catch HAError.refused(_, let remote) {
-                lastRemote = remote ?? lastRemote
+                let commands = try await client.report(makeReport(results: results))
+                store.unsentResults = Array(store.unsentResults.dropFirst(results.count))
+                store.needsReport = !store.unsentResults.isEmpty
+                store.lastReport = Date()
+                let fresh = LocalRunner.handle(commands, store: store).filter { $0.code != "duplicate" }
+                if fresh.isEmpty { return }
             } catch {
-                break
+                store.needsReport = true
+                return
             }
-            queue.removeFirst()
-            store.pending = queue
-        }
-        if let lastRemote, queue.isEmpty {
-            await adopt(lastRemote, client: client)
         }
     }
 
-    /// Pull state from HA. With `since` this long-polls.
-    @discardableResult
-    func refresh(since: Int? = nil, wait: Int = 25) async throws -> BrickState {
-        guard let client = HAClient.current(store) else {
-            return tickLocal()
+    /// Long-poll HA for commands (while the app is open).
+    func pollCommands(wait: Int = 25) async throws {
+        guard let client = HAClient.current(store) else { return }
+        if store.needsReport { await report() }
+        let commands = try await client.commands(deviceId: store.deviceId, wait: wait)
+        if !LocalRunner.handle(commands, store: store).isEmpty {
+            await report()
         }
-        await flushPending(client)
-        let remote = try await client.state(since: since, wait: wait)
-        if store.pending.isEmpty {
-            await adopt(remote, client: client)
-        }
-        return store.book.state
     }
 
-    /// Advance local timers (standalone / offline).
-    @discardableResult
-    func tickLocal() -> BrickState {
-        let modes = store.modes
-        let book = store.updateBook { book -> LocalBook in
-            BrickEngine.tick(&book)
-            book.state.stats = BrickEngine.stats(book)
-            return book
-        }
-        ShieldController.sync(book, modes: modes)
-        return book.state
-    }
-
-    /// Apply HA's state to the phone, then tell HA we did.
-    func adopt(_ remote: RemoteState, client: HAClient?) async {
-        let modes = store.modes
-        let book = store.updateBook { book -> LocalBook in
-            book.state = remote.state
-            return book
-        }
-        ShieldController.sync(book, modes: modes)
-        store.lastSync = Date()
-        if let client { await heartbeat(client) }
-    }
-
-    /// Handle the `brick` dictionary from a push (works with no network).
-    func handlePush(_ userInfo: [AnyHashable: Any]) async {
-        guard let dict = userInfo["brick"] as? [String: Any],
+    /// A push from HA carrying a command. Works without network; the result
+    /// is reported if the network is there.
+    func handlePush(_ userInfo: [AnyHashable: Any]) async -> CommandResult? {
+        guard let dict = userInfo["brick_cmd"] as? [String: Any],
               let data = try? JSONSerialization.data(withJSONObject: dict),
-              let push = try? JSON.snakeDecoder.decode(PushState.self, from: data) else { return }
-        let client = HAClient.current(store)
-        if !store.pending.isEmpty {
-            // We have unsent offline changes: reconcile properly or not at all.
-            await flushPending(client)
-            return
-        }
-        let current = store.book.state
-        guard push.rev >= current.revision else { return }  // out-of-order push
-        let modes = store.modes
-        let book = store.updateBook { book -> LocalBook in
-            book.state = push.merged(into: book.state)
-            return book
-        }
-        ShieldController.sync(book, modes: modes)
-        if let client {
-            // Best effort: fetch the full state (stats, mode names) and ack.
-            if let remote = try? await client.state() { await adopt(remote, client: client) }
-        }
+              let cmd = try? JSON.snakeDecoder.decode(RemoteCommand.self, from: data) else { return nil }
+        let result = LocalRunner.handle([cmd], store: store).first
+        await report()
+        return result
     }
 
-    // MARK: Device registration
-
-    func heartbeat(_ client: HAClient? = nil) async {
-        guard let client = client ?? HAClient.current(store) else { return }
-        var body: [String: Any] = [
-            "device_id": store.deviceId,
-            "name": store.connection?.deviceName ?? "iPhone",
-            "authorized": ShieldController.isAuthorized,
-            "applied_revision": store.book.state.revision,
-            "modes": store.modes.map { ["id": $0.id, "name": $0.name] },
-            "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
-        ]
-        if let token = store.apnsToken {
-            body["apns_token"] = token
-            body["apns_sandbox"] = APNsEnvironment.isSandbox
-        }
-        _ = try? await client.device(body)
+    private func makeReport(results: [CommandResult]) -> PhoneReport {
+        let book = store.book
+        return PhoneReport(
+            deviceId: store.deviceId,
+            name: store.connection?.deviceName ?? "iPhone",
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            authorized: ShieldController.isAuthorized,
+            apnsToken: store.apnsToken,
+            apnsSandbox: store.apnsToken == nil ? nil : APNsEnvironment.isSandbox,
+            modes: store.modes.map { PhoneReport.Mode(id: $0.id, name: $0.name) },
+            tagHashes: Array(book.tags.keys).sorted(),
+            rules: book.rules,
+            state: book.state,
+            stats: BrickEngine.stats(book),
+            results: results
+        )
     }
 
-    /// Connect (or re-test) a Home Assistant server.
+    /// Link a Home Assistant server. Validates the URL and token.
     func connect(baseURL: URL, token: String, deviceName: String) async throws {
         let client = HAClient(baseURL: baseURL, token: token)
-        _ = try await client.state()  // validates URL + token + integration
         store.connection = HAConnection(baseURL: baseURL, deviceName: deviceName)
         store.token = token
-        // Register first so HA learns our modes, then take HA's state.
-        await heartbeat(client)
-        try await refresh()
+        do {
+            let commands = try await client.report(makeReport(results: []))
+            store.lastReport = Date()
+            store.needsReport = false
+            // Don't run anything that was queued before we were linked.
+            _ = commands
+        } catch {
+            store.connection = nil
+            store.token = nil
+            throw error
+        }
     }
 
     func disconnect() {
         store.connection = nil
         store.token = nil
-        store.pending = []
+        store.unsentResults = []
     }
 }
 
@@ -203,37 +172,4 @@ enum APNsEnvironment {
         guard let range = text.range(of: "<key>aps-environment</key>") else { return false }
         return text[range.upperBound...].prefix(100).contains("development")
     }()
-}
-
-/// Synchronous, network-free path for extensions (DeviceActivity monitor):
-/// apply the command with the local engine and queue it for HA if connected.
-enum OfflineRunner {
-    @discardableResult
-    static func run(_ cmd: PendingCommand, store: SharedStore = .shared) -> Bool {
-        let modes = store.modes
-        do {
-            let book = try store.updateBook { book -> LocalBook in
-                BrickEngine.tick(&book)
-                try BrickEngine.apply(cmd, to: &book)
-                book.state.stats = BrickEngine.stats(book)
-                return book
-            }
-            ShieldController.sync(book, modes: modes)
-            if store.connection != nil { store.enqueue(cmd) }
-            return true
-        } catch {
-            NSLog("BrickHub: \(cmd.action.rawValue) refused offline: \(error.localizedDescription)")
-            return false
-        }
-    }
-
-    /// End expired timers locally (HA does the same on its side).
-    static func tick(store: SharedStore = .shared) {
-        let modes = store.modes
-        let book = store.updateBook { book -> LocalBook in
-            BrickEngine.tick(&book)
-            return book
-        }
-        ShieldController.sync(book, modes: modes)
-    }
 }

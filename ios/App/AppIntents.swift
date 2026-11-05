@@ -32,8 +32,8 @@ struct BrickIntent: AppIntent {
     var minutes: Int?
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let cmd = PendingCommand(action: .brick, method: .automation, modeId: mode?.id,
-                                 durationMinutes: minutes.map(Double.init), source: "Shortcut")
+        let cmd = BrickCommand(action: .brick, method: .automation, modeId: mode?.id,
+                               durationMinutes: minutes.map(Double.init), source: "Shortcut")
         try await BrickSync.shared.perform(cmd)
         await MainActor.run { AppModel.shared.reload() }
         return .result(dialog: "Bricked.")
@@ -47,7 +47,7 @@ struct UnbrickIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         // Shortcuts can be run by hand, so they count as manual.
-        try await BrickSync.shared.perform(PendingCommand(action: .unbrick, method: .manual, source: "Shortcut"))
+        try await BrickSync.shared.perform(BrickCommand(action: .unbrick, method: .manual, source: "Shortcut"))
         await MainActor.run { AppModel.shared.reload() }
         return .result(dialog: "Unbricked.")
     }
@@ -69,8 +69,8 @@ struct IsBrickedIntent: AppIntent {
     static var title: LocalizedStringResource = "Is Phone Bricked"
 
     func perform() async throws -> some IntentResult & ReturnsValue<Bool> {
-        let state = (try? await BrickSync.shared.refresh()) ?? SharedStore.shared.book.state
-        return .result(value: state.bricked)
+        LocalRunner.tick()
+        return .result(value: SharedStore.shared.book.state.bricked)
     }
 }
 

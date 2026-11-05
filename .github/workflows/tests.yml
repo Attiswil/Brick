@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  pytest:
+  home-assistant:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,3 +14,12 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements_test.txt
       - run: pytest -q
+
+  phone-engine:
+    # The iPhone's brick engine (rules, emergency unbricks, reset, commands
+    # from Home Assistant) has no Apple-only dependencies, so it tests on Linux.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+        working-directory: ios/BrickCore

@@ -8,65 +8,6 @@ enum BrickConfig {
     }
 }
 
-enum JSON {
-    static let encoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.dateEncodingStrategy = .custom { date, enc in
-            var c = enc.singleValueContainer()
-            try c.encode(ISO8601.string(date))
-        }
-        return e
-    }()
-
-    /// Decodes Home Assistant's snake_case JSON with ISO-8601 dates.
-    static let snakeDecoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.keyDecodingStrategy = .convertFromSnakeCase
-        d.dateDecodingStrategy = .custom { dec in
-            let c = try dec.singleValueContainer()
-            let s = try c.decode(String.self)
-            guard let date = ISO8601.date(s) else {
-                throw DecodingError.dataCorruptedError(in: c, debugDescription: "Bad date \(s)")
-            }
-            return date
-        }
-        return d
-    }()
-
-    static let decoder: JSONDecoder = {
-        let d = JSONDecoder()
-        d.dateDecodingStrategy = snakeDecoder.dateDecodingStrategy
-        return d
-    }()
-}
-
-enum ISO8601 {
-    private static let withFraction: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
-    private static let plain: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
-
-    static func string(_ d: Date) -> String { withFraction.string(from: d) }
-
-    static func date(_ s: String) -> Date? {
-        if let d = withFraction.date(from: s) ?? plain.date(from: s) { return d }
-        // Trim long fractions ("…:00.123456+00:00") down to milliseconds.
-        if let dot = s.firstIndex(of: "."),
-           let tz = s[dot...].firstIndex(where: { $0 == "+" || $0 == "-" || $0 == "Z" }) {
-            let frac = s[s.index(after: dot)..<tz].prefix(3)
-            let trimmed = String(s[..<dot]) + "." + String(frac) + String(s[tz...])
-            return withFraction.date(from: trimmed)
-        }
-        return nil
-    }
-}
-
 struct HAConnection: Codable, Equatable {
     var baseURL: URL
     var deviceName: String
@@ -108,9 +49,17 @@ final class SharedStore {
         set { write("schedules", newValue) }
     }
 
-    var pending: [PendingCommand] {
-        get { read("pending", [PendingCommand].self) ?? [] }
-        set { write("pending", newValue) }
+    /// Results of Home Assistant commands not yet reported back.
+    var unsentResults: [CommandResult] {
+        get { read("unsentResults", [CommandResult].self) ?? [] }
+        set { write("unsentResults", newValue) }
+    }
+
+    /// Set when the state changed somewhere without network (an extension),
+    /// so the app reports to Home Assistant next time it runs.
+    var needsReport: Bool {
+        get { defaults.bool(forKey: "needsReport") }
+        set { defaults.set(newValue, forKey: "needsReport") }
     }
 
     var connection: HAConnection? {
@@ -123,9 +72,9 @@ final class SharedStore {
         set { defaults.set(newValue, forKey: "apnsToken") }
     }
 
-    var lastSync: Date? {
-        get { defaults.object(forKey: "lastSync") as? Date }
-        set { defaults.set(newValue, forKey: "lastSync") }
+    var lastReport: Date? {
+        get { defaults.object(forKey: "lastReport") as? Date }
+        set { defaults.set(newValue, forKey: "lastReport") }
     }
 
     var deviceId: String {
@@ -149,8 +98,8 @@ final class SharedStore {
         return result
     }
 
-    func enqueue(_ cmd: PendingCommand) {
-        pending = pending + [cmd]
+    var modeNames: [String: String] {
+        Dictionary(modes.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
     }
 
     // MARK: Token (Keychain, shared through the app group)

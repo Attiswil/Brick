@@ -97,6 +97,7 @@ class ApnsClient:
         sandbox: bool,
         background: bool,
         collapse_id: str | None = None,
+        expires_at: int | None = None,
     ) -> PushResult:
         client = await self._get_client()
         token = await self._hass.async_add_executor_job(self._token)
@@ -106,7 +107,8 @@ class ApnsClient:
             "apns-push-type": "background" if background else "alert",
             # Background pushes must use priority 5.
             "apns-priority": "5" if background else "10",
-            "apns-expiration": str(int(time.time()) + 3600),
+            # Apple drops the push if it can't deliver it in time.
+            "apns-expiration": str(expires_at or int(time.time()) + 3600),
         }
         if collapse_id:
             headers["apns-collapse-id"] = collapse_id

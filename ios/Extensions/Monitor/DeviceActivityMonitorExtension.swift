@@ -2,7 +2,8 @@ import DeviceActivity
 import Foundation
 
 /// iOS wakes this extension at DeviceActivity interval boundaries, even if
-/// the app was force-quit and the phone has no signal.
+/// the app was force-quit and the phone has no signal. It has no network, so
+/// it only changes local state; the app reports to Home Assistant later.
 final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
     private let store = SharedStore.shared
 
@@ -11,23 +12,22 @@ final class DeviceActivityMonitorExtension: DeviceActivityMonitor {
         guard let schedule = schedule(for: activity) else { return }
         let weekday = Calendar.current.component(.weekday, from: Date())
         guard schedule.weekdays.contains(weekday), !store.book.state.bricked else { return }
-        OfflineRunner.run(PendingCommand(action: .brick, method: .schedule,
-                                         modeId: schedule.modeId, source: schedule.name))
+        try? LocalRunner.run(BrickCommand(action: .brick, method: .schedule,
+                                          modeId: schedule.modeId, source: schedule.name), store: store)
     }
 
     override func intervalDidEnd(for activity: DeviceActivityName) {
         super.intervalDidEnd(for: activity)
         if activity == ActivityScheduler.timerActivity {
-            // Timed brick is over. HA ends it on its side too, so no need to queue.
-            OfflineRunner.tick()
+            LocalRunner.tick(store: store)  // timed brick is over
             return
         }
         guard let schedule = schedule(for: activity) else { return }
         let state = store.book.state
-        // Only end bricks this schedule started - never a manual/HA brick.
+        // Only end a brick this schedule started.
         guard state.bricked, state.lastMethod == BrickMethod.schedule.rawValue,
               state.source == schedule.name else { return }
-        OfflineRunner.run(PendingCommand(action: .unbrick, method: .schedule, source: schedule.name))
+        try? LocalRunner.run(BrickCommand(action: .unbrick, method: .schedule, source: schedule.name), store: store)
     }
 
     private func schedule(for activity: DeviceActivityName) -> BrickSchedule? {

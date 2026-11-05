@@ -7,6 +7,8 @@ import ManagedSettings
 /// when the app isn't running, so the brick holds until something removes it.
 enum ShieldController {
     static let store = ManagedSettingsStore(named: ManagedSettingsStore.Name("brick"))
+    /// Separate store so the clock lock outlives the brick itself.
+    static let clockStore = ManagedSettingsStore(named: ManagedSettingsStore.Name("brick.clock"))
 
     static var isAuthorized: Bool {
         AuthorizationCenter.shared.authorizationStatus == .approved
@@ -15,19 +17,21 @@ enum ShieldController {
     /// Make the shields match the book. Safe to call as often as you like.
     static func sync(_ book: LocalBook, modes: [BrickMode]) {
         if book.state.bricked {
-            apply(resolveMode(book.state, modes: modes))
+            apply(resolveMode(book.state.modeId, modes: modes))
         } else {
             store.clearAllSettings()
         }
+        // The emergency reset runs on the phone's clock, so don't let the
+        // clock be changed by hand while bricked or while a reset is pending.
+        let lockClock = book.state.bricked || book.state.emergencyResetAt != nil
+        clockStore.dateAndTime.requireAutomaticDateAndTime = lockClock ? true : nil
         ActivityScheduler.syncTimer(endsAt: book.state.bricked ? book.state.endsAt : nil)
     }
 
-    /// The mode HA asked for, else the default, else the first one. `nil`
-    /// means the phone has no modes yet - then everything is blocked.
-    static func resolveMode(_ state: BrickState, modes: [BrickMode]) -> BrickMode? {
-        modes.first { $0.id == state.modeId }
-            ?? modes.first { $0.id == state.defaultModeId }
-            ?? modes.first
+    /// The requested mode, else the first one. `nil` means the phone has no
+    /// modes yet - then everything is blocked.
+    static func resolveMode(_ modeId: String?, modes: [BrickMode]) -> BrickMode? {
+        modes.first { $0.id == modeId } ?? modes.first
     }
 
     private static func apply(_ mode: BrickMode?) {

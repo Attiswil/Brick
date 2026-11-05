@@ -22,10 +22,11 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    StatusCard(state: model.state, modeName: modeName(model.state.modeId))
+                    StatusCard(state: model.state, strict: model.rules.strict,
+                               modeName: model.modeName(model.state.modeId))
                     if model.state.bricked { brickedActions } else { unbrickedActions }
                     EmergencyCard(confirm: $confirmEmergency)
-                    if let stats = model.state.stats { StatsCard(stats: stats) }
+                    StatsCard(stats: model.stats)
                     ConnectionFooter()
                 }
                 .padding()
@@ -35,14 +36,10 @@ struct HomeView: View {
             .confirmationDialog("Use an emergency unbrick?", isPresented: $confirmEmergency, titleVisibility: .visible) {
                 Button("Use emergency unbrick", role: .destructive) { Task { await model.emergencyUnbrick() } }
             } message: {
-                Text("You have \(model.state.emergencyRemaining) left. Once they're gone, a reset takes \(Int(model.state.resetHours)) hours.")
+                Text("You have \(model.state.emergencyRemaining) left. Once they're gone, a reset takes \(Int(model.rules.resetHours)) hours.")
             }
-            .onAppear { if modeId == nil { modeId = model.state.defaultModeId ?? model.modes.first?.id } }
+            .onAppear { if modeId == nil { modeId = model.state.modeId ?? model.modes.first?.id } }
         }
-    }
-
-    private func modeName(_ id: String?) -> String? {
-        model.modes.first { $0.id == id }?.name ?? model.state.modeName
     }
 
     @ViewBuilder private var brickedActions: some View {
@@ -50,7 +47,7 @@ struct HomeView: View {
             ActionButton(title: "Tap brick to unbrick", systemImage: "wave.3.right") {
                 await model.scanBrick()
             }
-            if !model.state.strict {
+            if !model.rules.strict {
                 ActionButton(title: "Unbrick", systemImage: "lock.open", prominent: false) {
                     await model.unbrickWithoutTag()
                 }
@@ -91,6 +88,7 @@ struct HomeView: View {
 
 struct StatusCard: View {
     var state: BrickState
+    var strict: Bool
     var modeName: String?
 
     var body: some View {
@@ -118,7 +116,7 @@ struct StatusCard: View {
                 if let source = state.source {
                     Text("By \(source)").font(.footnote).foregroundStyle(.tertiary)
                 }
-                if state.strict {
+                if strict {
                     Label("Strict mode", systemImage: "shield.lefthalf.filled")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.orange)
@@ -137,12 +135,13 @@ struct EmergencyCard: View {
 
     var body: some View {
         let s = model.state
+        let maxCount = model.rules.emergencyMax
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label("Emergency unbricks", systemImage: "lifepreserver")
                     .font(.headline)
                 Spacer()
-                Text("\(s.emergencyRemaining) of \(s.emergencyMax)")
+                Text("\(s.emergencyRemaining) of \(maxCount)")
                     .font(.headline.monospacedDigit())
                     .foregroundStyle(s.emergencyRemaining == 0 ? .red : .primary)
             }
@@ -162,8 +161,8 @@ struct EmergencyCard: View {
                 .font(.subheadline)
                 Text(resetAt.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption).foregroundStyle(.secondary)
-            } else if s.emergencyRemaining < s.emergencyMax {
-                Button("Request reset (takes \(Int(s.resetHours)) hours)") {
+            } else if s.emergencyRemaining < maxCount {
+                Button("Request reset (takes \(Int(model.rules.resetHours)) hours)") {
                     Task { await model.requestReset() }
                 }
                 .font(.subheadline)
@@ -206,25 +205,16 @@ struct ConnectionFooter: View {
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(text).font(.footnote).foregroundStyle(.secondary)
+        if model.isConnected {
+            HStack(spacing: 6) {
+                Circle().fill(model.haReachable == false ? Color.orange : Color.green).frame(width: 8, height: 8)
+                Text(model.haReachable == false
+                     ? "Home Assistant unreachable - everything still works on this phone"
+                     : "Home Assistant can trigger this phone")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 4)
-    }
-
-    private var color: Color {
-        guard model.isConnected else { return .gray }
-        if model.online == true { return .green }
-        if model.online == false { return .orange }
-        return .gray
-    }
-
-    private var text: String {
-        guard model.isConnected else { return "Standalone - not connected to Home Assistant" }
-        var t = model.online == false ? "Home Assistant unreachable" : "Connected to Home Assistant"
-        if model.pendingCount > 0 { t += " · \(model.pendingCount) queued" }
-        return t
     }
 }

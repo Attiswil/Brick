@@ -1,5 +1,6 @@
 # Generate the Xcode project with:  brew install xcodegen && xcodegen
 # Then open BrickHub.xcodeproj, pick your team and run on your iPhone.
+# Engine tests: cd BrickCore && swift test
 name: BrickHub
 options:
   bundleIdPrefix: com.example
@@ -28,6 +29,7 @@ targets:
     sources:
       - App
       - Shared
+      - BrickCore/Sources/BrickCore
     dependencies:
       - target: BrickHubMonitor
       - target: BrickHubShield
@@ -62,6 +64,7 @@ targets:
     sources:
       - Extensions/Monitor
       - Shared
+      - BrickCore/Sources/BrickCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).monitor
@@ -87,6 +90,7 @@ targets:
     sources:
       - Extensions/Shield
       - Shared
+      - BrickCore/Sources/BrickCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).shield
@@ -112,6 +116,7 @@ targets:
     sources:
       - Extensions/Notifications
       - Shared
+      - BrickCore/Sources/BrickCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).notifications

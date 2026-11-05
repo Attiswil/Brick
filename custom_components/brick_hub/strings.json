@@ -3,19 +3,7 @@
     "step": {
       "user": {
         "title": "Brick Hub",
-        "description": "Brick your iPhone from any Home Assistant trigger. You can change these later, but never while bricked.",
-        "data": {
-          "emergency_max": "Emergency unbricks",
-          "reset_hours": "Emergency reset delay",
-          "strict": "Strict mode",
-          "auto_request_reset": "Start the reset automatically when they run out",
-          "tag_toggles": "Scanning a brick tag while unbricked bricks the phone"
-        },
-        "data_description": {
-          "emergency_max": "How many emergency unbricks you get before needing a reset.",
-          "reset_hours": "How long a reset takes to refill your emergency unbricks (48 h = 2 days).",
-          "strict": "Refuse unbricks from a button press. Only a brick tag, a timer, an automation or an emergency unbrick can end a brick."
-        }
+        "description": "Lets Home Assistant trigger the Brick Hub iPhone app. The phone keeps the rules (strict mode, emergency unbricks, the reset) and works without Home Assistant. After this, link the phone from the app: Settings → Link Home Assistant."
       }
     },
     "abort": {
@@ -24,22 +12,9 @@
   },
   "options": {
     "step": {
-      "policy": {
-        "title": "Rules",
-        "data": {
-          "emergency_max": "Emergency unbricks",
-          "reset_hours": "Emergency reset delay",
-          "strict": "Strict mode",
-          "auto_request_reset": "Start the reset automatically when they run out",
-          "tag_toggles": "Scanning a brick tag while unbricked bricks the phone"
-        },
-        "data_description": {
-          "emergency_max": "Raising this does not refill your emergency unbricks; only a completed reset does."
-        }
-      },
       "push": {
         "title": "Push to iPhone (APNs)",
-        "description": "Optional but recommended: lets Home Assistant wake the iPhone app the moment a trigger fires. Use an APNs auth key (.p8) from your Apple Developer account.",
+        "description": "Recommended: lets Home Assistant reach the phone instantly, even when the app is closed. Without push, commands only reach the phone while the app is open. Use an APNs auth key (.p8) from your Apple Developer account.",
         "data": {
           "push_style": "Push style",
           "apns_team_id": "Team ID",
@@ -52,9 +27,6 @@
     "error": {
       "apns_incomplete": "Fill in Team ID, Key ID and the key, or leave all three empty.",
       "apns_bad_key": "That doesn't look like a valid .p8 key."
-    },
-    "abort": {
-      "locked_while_bricked": "Settings are locked while you're bricked."
     }
   },
   "selector": {
@@ -62,73 +34,187 @@
       "options": {
         "alert": "Notification (most reliable)",
         "silent": "Silent background push (iOS may delay it)",
-        "off": "Off (app polls)"
+        "off": "Off (only while the app is open)"
       }
     }
   },
   "entity": {
-    "switch": {"bricked": {"name": "Bricked"}},
-    "select": {"mode": {"name": "Mode"}},
+    "switch": {
+      "bricked": {
+        "name": "Bricked"
+      }
+    },
+    "select": {
+      "mode": {
+        "name": "Mode"
+      }
+    },
     "button": {
-      "emergency_unbrick": {"name": "Emergency unbrick"},
-      "request_emergency_reset": {"name": "Request emergency reset"},
-      "cancel_emergency_reset": {"name": "Cancel emergency reset"}
+      "emergency_unbrick": {
+        "name": "Emergency unbrick"
+      },
+      "request_emergency_reset": {
+        "name": "Request emergency reset"
+      },
+      "cancel_emergency_reset": {
+        "name": "Cancel emergency reset"
+      }
     },
     "sensor": {
-      "emergency_unbricks_remaining": {"name": "Emergency unbricks remaining"},
-      "emergency_reset_at": {"name": "Emergency reset completes"},
-      "bricked_since": {"name": "Bricked since"},
-      "brick_ends_at": {"name": "Brick ends"},
-      "time_bricked_today": {"name": "Time bricked today"},
-      "time_bricked_week": {"name": "Time bricked (7 days)"},
-      "streak": {"name": "Streak"},
-      "last_method": {"name": "Last change by"},
-      "brick_tags": {"name": "Brick tags"}
+      "emergency_unbricks_remaining": {
+        "name": "Emergency unbricks remaining"
+      },
+      "emergency_reset_at": {
+        "name": "Emergency reset completes"
+      },
+      "bricked_since": {
+        "name": "Bricked since"
+      },
+      "brick_ends_at": {
+        "name": "Brick ends"
+      },
+      "time_bricked_today": {
+        "name": "Time bricked today"
+      },
+      "time_bricked_week": {
+        "name": "Time bricked (7 days)"
+      },
+      "streak": {
+        "name": "Streak"
+      },
+      "last_method": {
+        "name": "Last change by"
+      },
+      "last_report": {
+        "name": "Last report"
+      }
     },
     "binary_sensor": {
-      "phone_in_sync": {"name": "Phone in sync"},
-      "screen_time_access": {"name": "Screen Time access"}
+      "screen_time_access": {
+        "name": "Screen Time access"
+      }
     }
   },
   "services": {
     "brick": {
       "name": "Brick",
-      "description": "Block the apps in a mode on your iPhone(s).",
+      "description": "Ask the phone(s) to brick. Always allowed.",
       "fields": {
-        "mode": {"name": "Mode", "description": "Mode name or id from the app. Defaults to the selected mode."},
-        "duration": {"name": "Duration", "description": "Unbrick automatically after this long. Leave empty for no time limit."},
-        "source": {"name": "Source", "description": "Label shown on the phone, e.g. \"Bedtime\"."}
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Mode name or id from the app. Defaults to the phone's Mode select."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Unbrick automatically after this long. Empty = no time limit."
+        },
+        "source": {
+          "name": "Source",
+          "description": "Label shown on the phone, e.g. \"Bedtime\"."
+        }
       }
     },
     "unbrick": {
       "name": "Unbrick",
-      "description": "Unblock apps. In strict mode only works from automations, not when run by hand.",
-      "fields": {"source": {"name": "Source", "description": "Label shown on the phone."}}
+      "description": "Ask the phone(s) to unbrick. Automations can end any brick; run by hand from the UI it obeys the phone's strict mode.",
+      "fields": {
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        },
+        "source": {
+          "name": "Source",
+          "description": "Label shown on the phone, e.g. \"Bedtime\"."
+        }
+      }
     },
     "toggle": {
       "name": "Toggle",
       "description": "Brick if unbricked, unbrick if bricked.",
       "fields": {
-        "mode": {"name": "Mode", "description": "Mode used when bricking."},
-        "duration": {"name": "Duration", "description": "Duration used when bricking."},
-        "source": {"name": "Source", "description": "Label shown on the phone."}
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "Mode used when bricking."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Duration used when bricking."
+        },
+        "source": {
+          "name": "Source",
+          "description": "Label shown on the phone, e.g. \"Bedtime\"."
+        }
       }
     },
-    "emergency_unbrick": {"name": "Emergency unbrick", "description": "Spend one emergency unbrick."},
-    "request_emergency_reset": {"name": "Request emergency reset", "description": "Start the countdown that refills your emergency unbricks."},
-    "cancel_emergency_reset": {"name": "Cancel emergency reset", "description": "Stop a pending reset."},
+    "emergency_unbrick": {
+      "name": "Emergency unbrick",
+      "description": "Spend one of the phone's emergency unbricks.",
+      "fields": {
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        }
+      }
+    },
+    "request_emergency_reset": {
+      "name": "Request emergency reset",
+      "description": "Start the phone's reset countdown (48 hours by default).",
+      "fields": {
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        }
+      }
+    },
+    "cancel_emergency_reset": {
+      "name": "Cancel emergency reset",
+      "description": "Stop a pending reset.",
+      "fields": {
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        }
+      }
+    },
     "add_tag": {
       "name": "Add brick tag",
-      "description": "Register an NFC tag (UID or Home Assistant tag id) as a brick. Not allowed while bricked.",
+      "description": "Teach the phone a tag id (e.g. from an ESPHome reader). Refused while bricked.",
       "fields": {
-        "tag_id": {"name": "Tag ID", "description": "Tag UID or HA tag id."},
-        "name": {"name": "Name", "description": "A friendly name."}
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        },
+        "tag_id": {
+          "name": "Tag ID",
+          "description": "Tag UID or HA tag id."
+        },
+        "name": {
+          "name": "Name",
+          "description": "A friendly name."
+        }
       }
     },
     "remove_tag": {
       "name": "Remove brick tag",
-      "description": "Forget a brick tag. Not allowed while bricked.",
-      "fields": {"tag_id": {"name": "Tag ID", "description": "Tag UID or HA tag id."}}
+      "description": "Make the phone forget a tag. Refused while bricked.",
+      "fields": {
+        "device_id": {
+          "name": "Phone",
+          "description": "Which phone(s). Leave empty for every linked phone."
+        },
+        "tag_id": {
+          "name": "Tag ID",
+          "description": "Tag UID or HA tag id."
+        }
+      }
     }
   }
 }

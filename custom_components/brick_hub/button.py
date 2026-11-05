@@ -1,50 +1,37 @@
-"""Emergency unbrick and the 48h reset."""
+"""Emergency unbrick and the reset (per phone)."""
 
 from __future__ import annotations
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .engine import Action, BrickError, Command
-from .entity import BrickEntity
-from .hub import method_from_context
+from .entity import PhoneEntity, setup_phone_platform
 
 BUTTONS = {
-    "emergency_unbrick": (Action.EMERGENCY_UNBRICK, "mdi:lifebuoy"),
-    "request_emergency_reset": (Action.REQUEST_RESET, "mdi:timer-sand"),
-    "cancel_emergency_reset": (Action.CANCEL_RESET, "mdi:timer-sand-paused"),
+    "emergency_unbrick": "mdi:lifebuoy",
+    "request_emergency_reset": "mdi:timer-sand",
+    "cancel_emergency_reset": "mdi:timer-sand-paused",
 }
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    async_add_entities(
-        BrickButton(entry.runtime_data, key, action, icon)
-        for key, (action, icon) in BUTTONS.items()
+    setup_phone_platform(
+        hass, entry, async_add_entities,
+        lambda h, p: [PhoneButton(h, p, key, icon) for key, icon in BUTTONS.items()],
     )
 
 
-class BrickButton(BrickEntity, ButtonEntity):
-    """A one-shot command."""
+class PhoneButton(PhoneEntity, ButtonEntity):
+    """Sends one command to the phone."""
 
-    def __init__(self, hub, key: str, action: Action, icon: str) -> None:
-        super().__init__(hub, key)
-        self._action = action
+    def __init__(self, hub, phone, key: str, icon: str) -> None:
+        super().__init__(hub, phone, key)
+        self._action = key
         self._attr_icon = icon
 
     async def async_press(self) -> None:
-        try:
-            await self.hub.async_command(
-                Command(
-                    self._action,
-                    method_from_context(self._context),
-                    source="Home Assistant",
-                ),
-                context=self._context,
-            )
-        except BrickError as err:
-            raise HomeAssistantError(err.message) from err
+        await self.send(self._action)

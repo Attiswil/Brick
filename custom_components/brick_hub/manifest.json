@@ -7,7 +7,7 @@
   "after_dependencies": ["tag"],
   "documentation": "https://github.com/attiswil/brick",
   "integration_type": "service",
-  "iot_class": "local_push",
+  "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/attiswil/brick/issues",
   "requirements": ["h2>=4.1.0"],
   "single_config_entry": true,

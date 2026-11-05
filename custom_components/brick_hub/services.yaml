@@ -1,5 +1,10 @@
 brick:
   fields:
+    device_id: &phone
+      selector:
+        device:
+          integration: brick_hub
+          multiple: true
     mode:
       example: "Deep work"
       selector:
@@ -14,11 +19,13 @@ brick:
         text:
 unbrick:
   fields:
+    device_id: *phone
     source:
       selector:
         text:
 toggle:
   fields:
+    device_id: *phone
     mode:
       selector:
         text:
@@ -29,21 +36,29 @@ toggle:
       selector:
         text:
 emergency_unbrick:
+  fields:
+    device_id: *phone
 request_emergency_reset:
+  fields:
+    device_id: *phone
 cancel_emergency_reset:
+  fields:
+    device_id: *phone
 add_tag:
   fields:
+    device_id: *phone
     tag_id:
       required: true
       example: "04-A1-B2-C3-D4-E5-F6"
       selector:
         text:
     name:
-      example: "Desk brick"
+      example: "Front door reader"
       selector:
         text:
 remove_tag:
   fields:
+    device_id: *phone
     tag_id:
       required: true
       selector:

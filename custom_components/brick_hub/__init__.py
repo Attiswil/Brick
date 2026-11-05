@@ -1,7 +1,8 @@
-"""Brick Hub: an NFC-style app blocker for iPhone, driven by Home Assistant.
+"""Brick Hub: let Home Assistant trigger the Brick Hub iPhone app.
 
-Any Home Assistant trigger can brick or unbrick your phone. The companion
-iOS app applies the block with Apple's Screen Time API.
+The phone owns the brick (state, rules, emergency unbricks, tags) and works
+without Home Assistant. This integration lets any HA trigger send it
+commands and shows each phone's state as entities.
 """
 
 from __future__ import annotations
@@ -11,12 +12,14 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 
 from .api import async_register_views
 from .const import (
+    ATTR_DEVICE_ID,
     ATTR_DURATION,
     ATTR_MODE,
     ATTR_NAME,
@@ -32,8 +35,7 @@ from .const import (
     SERVICE_TOGGLE,
     SERVICE_UNBRICK,
 )
-from .engine import Action, BrickError, Command, Method
-from .hub import BrickHub, method_from_context
+from .hub import BrickHub, Phone
 
 PLATFORMS = [
     Platform.BINARY_SENSOR,
@@ -45,138 +47,83 @@ PLATFORMS = [
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
+TARGET = {vol.Optional(ATTR_DEVICE_ID): vol.All(cv.ensure_list, [cv.string])}
 BRICK_SCHEMA = vol.Schema(
     {
+        **TARGET,
         vol.Optional(ATTR_MODE): cv.string,
         vol.Optional(ATTR_DURATION): cv.positive_time_period,
         vol.Optional(ATTR_SOURCE): cv.string,
     }
 )
-UNBRICK_SCHEMA = vol.Schema({vol.Optional(ATTR_SOURCE): cv.string})
-EMPTY_SCHEMA = vol.Schema({})
+SIMPLE_SCHEMA = vol.Schema({**TARGET, vol.Optional(ATTR_SOURCE): cv.string})
 ADD_TAG_SCHEMA = vol.Schema(
-    {vol.Required(ATTR_TAG_ID): cv.string, vol.Optional(ATTR_NAME): cv.string}
+    {**TARGET, vol.Required(ATTR_TAG_ID): cv.string, vol.Optional(ATTR_NAME): cv.string}
 )
-REMOVE_TAG_SCHEMA = vol.Schema({vol.Required(ATTR_TAG_ID): cv.string})
+REMOVE_TAG_SCHEMA = vol.Schema({**TARGET, vol.Required(ATTR_TAG_ID): cv.string})
 
 type BrickConfigEntry = ConfigEntry[BrickHub]
 
 
-def get_hub(hass: HomeAssistant) -> BrickHub:
-    hubs: dict[str, BrickHub] = hass.data.get(DOMAIN, {})
-    hub = next(iter(hubs.values()), None)
+def _hub(hass: HomeAssistant) -> BrickHub:
+    hub = next(iter(hass.data.get(DOMAIN, {}).values()), None)
     if hub is None:
         raise ServiceValidationError("Brick Hub isn't set up")
     return hub
 
 
-async def async_run(hub: BrickHub, cmd: Command, call_context) -> None:
-    """Run a command, turning refusals into readable HA errors."""
-    try:
-        await hub.async_command(cmd, context=call_context)
-    except BrickError as err:
-        raise HomeAssistantError(err.message) from err
+def _target_phones(hass: HomeAssistant, hub: BrickHub, call: ServiceCall) -> list[Phone]:
+    """Map HA device ids to phones. No device given = every phone."""
+    ha_ids = call.data.get(ATTR_DEVICE_ID)
+    if not ha_ids:
+        phones = hub.resolve_phones(None)
+    else:
+        registry = dr.async_get(hass)
+        phone_ids = []
+        for ha_id in ha_ids:
+            device = registry.async_get(ha_id)
+            ident = next(
+                (i[1] for i in device.identifiers if i[0] == DOMAIN), None
+            ) if device else ha_id  # also accept the phone's own id
+            phone_ids.append(ident)
+        phones = hub.resolve_phones(phone_ids)
+    if not phones:
+        raise ServiceValidationError(
+            "No phones are linked yet. Open the Brick Hub app → Settings → Link Home Assistant."
+        )
+    return phones
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register services (once, independent of config entries)."""
+    """Register services."""
 
-    def _source(call: ServiceCall) -> str:
-        if call.data.get(ATTR_SOURCE):
-            return call.data[ATTR_SOURCE]
-        return "Home Assistant" if call.context.user_id else "Automation"
-
-    async def brick(call: ServiceCall) -> None:
-        hub = get_hub(hass)
-        await async_run(
-            hub,
-            Command(
-                Action.BRICK,
-                method_from_context(call.context),
-                mode_id=hub.resolve_mode(call.data.get(ATTR_MODE)),
+    def handler(action: str):
+        async def handle(call: ServiceCall) -> None:
+            hub = _hub(hass)
+            await hub.async_send(
+                _target_phones(hass, hub, call),
+                action,
+                context=call.context,
+                mode=call.data.get(ATTR_MODE),
                 duration=call.data.get(ATTR_DURATION),
-                source=_source(call),
-            ),
-            call.context,
-        )
-
-    async def unbrick(call: ServiceCall) -> None:
-        hub = get_hub(hass)
-        await async_run(
-            hub,
-            Command(
-                Action.UNBRICK,
-                method_from_context(call.context),
-                source=_source(call),
-            ),
-            call.context,
-        )
-
-    async def toggle(call: ServiceCall) -> None:
-        hub = get_hub(hass)
-        await async_run(
-            hub,
-            Command(
-                Action.TOGGLE,
-                method_from_context(call.context),
-                mode_id=hub.resolve_mode(call.data.get(ATTR_MODE)),
-                duration=call.data.get(ATTR_DURATION),
-                source=_source(call),
-            ),
-            call.context,
-        )
-
-    def simple(action: Action):
-        async def handler(call: ServiceCall) -> None:
-            hub = get_hub(hass)
-            await async_run(
-                hub,
-                Command(action, method_from_context(call.context), source=_source(call)),
-                call.context,
+                tag_id=call.data.get(ATTR_TAG_ID),
+                tag_name=call.data.get(ATTR_NAME),
+                source=call.data.get(ATTR_SOURCE),
             )
 
-        return handler
+        return handle
 
-    async def add_tag(call: ServiceCall) -> None:
-        hub = get_hub(hass)
-        await async_run(
-            hub,
-            Command(
-                Action.REGISTER_TAG,
-                Method.MANUAL,
-                tag_id=call.data[ATTR_TAG_ID],
-                tag_name=call.data.get(ATTR_NAME),
-            ),
-            call.context,
-        )
-
-    async def remove_tag(call: ServiceCall) -> None:
-        hub = get_hub(hass)
-        await async_run(
-            hub,
-            Command(Action.REMOVE_TAG, Method.MANUAL, tag_id=call.data[ATTR_TAG_ID]),
-            call.context,
-        )
-
-    hass.services.async_register(DOMAIN, SERVICE_BRICK, brick, BRICK_SCHEMA)
-    hass.services.async_register(DOMAIN, SERVICE_UNBRICK, unbrick, UNBRICK_SCHEMA)
-    hass.services.async_register(DOMAIN, SERVICE_TOGGLE, toggle, BRICK_SCHEMA)
-    hass.services.async_register(
-        DOMAIN,
-        SERVICE_EMERGENCY_UNBRICK,
-        simple(Action.EMERGENCY_UNBRICK),
-        EMPTY_SCHEMA,
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_REQUEST_RESET, simple(Action.REQUEST_RESET), EMPTY_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_CANCEL_RESET, simple(Action.CANCEL_RESET), EMPTY_SCHEMA
-    )
-    hass.services.async_register(DOMAIN, SERVICE_ADD_TAG, add_tag, ADD_TAG_SCHEMA)
-    hass.services.async_register(
-        DOMAIN, SERVICE_REMOVE_TAG, remove_tag, REMOVE_TAG_SCHEMA
-    )
+    for service, action, schema in (
+        (SERVICE_BRICK, "brick", BRICK_SCHEMA),
+        (SERVICE_UNBRICK, "unbrick", SIMPLE_SCHEMA),
+        (SERVICE_TOGGLE, "toggle", BRICK_SCHEMA),
+        (SERVICE_EMERGENCY_UNBRICK, "emergency_unbrick", SIMPLE_SCHEMA),
+        (SERVICE_REQUEST_RESET, "request_emergency_reset", SIMPLE_SCHEMA),
+        (SERVICE_CANCEL_RESET, "cancel_emergency_reset", SIMPLE_SCHEMA),
+        (SERVICE_ADD_TAG, "register_tag", ADD_TAG_SCHEMA),
+        (SERVICE_REMOVE_TAG, "remove_tag", REMOVE_TAG_SCHEMA),
+    ):
+        hass.services.async_register(DOMAIN, service, handler(action), schema)
     return True
 
 
@@ -203,3 +150,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: BrickConfigEntry) -> bo
         hub: BrickHub = hass.data[DOMAIN].pop(entry.entry_id)
         await hub.async_unload()
     return unloaded
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: BrickConfigEntry, device: dr.DeviceEntry
+) -> bool:
+    """Let people delete an old phone from the UI."""
+    hub = entry.runtime_data
+    for ident in device.identifiers:
+        if ident[0] == DOMAIN:
+            hub.phones.pop(ident[1], None)
+            hub.pending.pop(ident[1], None)
+    await hub.async_save()
+    return True
