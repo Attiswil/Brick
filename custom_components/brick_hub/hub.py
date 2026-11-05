@@ -53,6 +53,7 @@ from .engine import (
     Result,
     Settings,
     hash_tag,
+    iso,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -375,7 +376,7 @@ class BrickHub:
                 "mode": eng.modes.get(eng.mode_id or ""),
                 "method": eng.last_method,
                 "source": eng.source,
-                "ends_at": eng.ends_at.isoformat() if eng.ends_at else None,
+                "ends_at": iso(eng.ends_at),
                 "emergency_remaining": eng.emergency_remaining,
                 "revision": eng.revision,
             },
@@ -392,12 +393,12 @@ class BrickHub:
             "rev": eng.revision,
             "bricked": eng.bricked,
             "mode_id": eng.mode_id,
-            "since": eng.bricked_since.isoformat() if eng.bricked_since else None,
-            "ends_at": eng.ends_at.isoformat() if eng.ends_at else None,
+            "since": iso(eng.bricked_since),
+            "ends_at": iso(eng.ends_at),
             "em": eng.emergency_remaining,
             "em_max": eng.settings.emergency_max,
             "em_reset": (
-                eng.emergency_reset_at.isoformat() if eng.emergency_reset_at else None
+                iso(eng.emergency_reset_at)
             ),
             "strict": eng.settings.strict,
             "src": (eng.source or "")[:60],

@@ -88,8 +88,8 @@ def hash_tag(tag_id: str) -> str:
     return hashlib.sha256(f"brick_hub:{norm}".encode()).hexdigest()
 
 
-def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
+def iso(value: datetime | None) -> str | None:
+    return value.isoformat(timespec="milliseconds") if value else None
 
 
 def _dt(value: str | None) -> datetime | None:
@@ -123,8 +123,8 @@ class Session:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "start": _iso(self.start),
-            "end": _iso(self.end),
+            "start": iso(self.start),
+            "end": iso(self.end),
             "mode_id": self.mode_id,
             "ended_by": self.ended_by,
         }
@@ -197,14 +197,14 @@ class Engine:
         return {
             "bricked": self.bricked,
             "mode_id": self.mode_id,
-            "bricked_since": _iso(self.bricked_since),
-            "ends_at": _iso(self.ends_at),
+            "bricked_since": iso(self.bricked_since),
+            "ends_at": iso(self.ends_at),
             "source": self.source,
             "last_method": self.last_method,
-            "last_changed": _iso(self.last_changed),
+            "last_changed": iso(self.last_changed),
             "revision": self.revision,
             "emergency_remaining": self.emergency_remaining,
-            "emergency_reset_at": _iso(self.emergency_reset_at),
+            "emergency_reset_at": iso(self.emergency_reset_at),
             "tags": dict(self.tags),
             "modes": dict(self.modes),
             "default_mode_id": self.default_mode_id,
@@ -535,18 +535,18 @@ class Engine:
             "mode_id": self.mode_id,
             "mode_name": self.modes.get(self.mode_id or ""),
             "default_mode_id": self.default_mode_id,
-            "bricked_since": _iso(self.bricked_since),
-            "ends_at": _iso(self.ends_at),
+            "bricked_since": iso(self.bricked_since),
+            "ends_at": iso(self.ends_at),
             "source": self.source,
             "last_method": self.last_method,
-            "last_changed": _iso(self.last_changed),
+            "last_changed": iso(self.last_changed),
             "emergency_remaining": self.emergency_remaining,
             "emergency_max": self.settings.emergency_max,
-            "emergency_reset_at": _iso(self.emergency_reset_at),
+            "emergency_reset_at": iso(self.emergency_reset_at),
             "reset_hours": self.settings.reset_hours,
             "strict": self.settings.strict,
             "tag_count": len(self.tags),
             "modes": [{"id": k, "name": v} for k, v in self.modes.items()],
             "stats": self.stats(now, tz),
-            "server_time": _iso(now),
+            "server_time": iso(now),
         }

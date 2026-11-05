@@ -1,0 +1,132 @@
+# Generate the Xcode project with:  brew install xcodegen && xcodegen
+# Then open BrickHub.xcodeproj, pick your team and run on your iPhone.
+name: BrickHub
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # ---- Change these two to your own values ----------------------------
+    BRICK_BUNDLE_ID: com.example.brickhub   # must be unique to you
+    DEVELOPMENT_TEAM: ""                    # your 10-character Apple Team ID
+    # ----------------------------------------------------------------------
+    BRICK_APP_GROUP: group.$(BRICK_BUNDLE_ID)
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+targets:
+  BrickHub:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    dependencies:
+      - target: BrickHubMonitor
+      - target: BrickHubShield
+      - target: BrickHubNotifications
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID)
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Brick Hub
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BrickAppGroup: $(BRICK_APP_GROUP)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [remote-notification, fetch]
+        BGTaskSchedulerPermittedIdentifiers: [$(PRODUCT_BUNDLE_IDENTIFIER).refresh]
+        NFCReaderUsageDescription: Brick Hub reads your brick tag to brick and unbrick your phone.
+        com.apple.developer.nfc.readersession.iso7816.select-identifiers: [D2760000850101]
+    entitlements:
+      path: App/BrickHub.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups: [$(BRICK_APP_GROUP)]
+        com.apple.developer.nfc.readersession.formats: [TAG]
+        aps-environment: development
+
+  BrickHubMonitor:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Monitor
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).monitor
+    info:
+      path: Extensions/Monitor/Info.plist
+      properties:
+        CFBundleDisplayName: Brick Hub Monitor
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BrickAppGroup: $(BRICK_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.deviceactivity.monitor-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).DeviceActivityMonitorExtension
+    entitlements:
+      path: Extensions/Monitor/Monitor.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups: [$(BRICK_APP_GROUP)]
+
+  BrickHubShield:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Shield
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).shield
+    info:
+      path: Extensions/Shield/Info.plist
+      properties:
+        CFBundleDisplayName: Brick Hub Shield
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BrickAppGroup: $(BRICK_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.ManagedSettingsUI.shield-configuration-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShieldConfigurationExtension
+    entitlements:
+      path: Extensions/Shield/Shield.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups: [$(BRICK_APP_GROUP)]
+
+  BrickHubNotifications:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Extensions/Notifications
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(BRICK_BUNDLE_ID).notifications
+    info:
+      path: Extensions/Notifications/Info.plist
+      properties:
+        CFBundleDisplayName: Brick Hub Notifications
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        BrickAppGroup: $(BRICK_APP_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: Extensions/Notifications/Notifications.entitlements
+      properties:
+        com.apple.developer.family-controls: true
+        com.apple.security.application-groups: [$(BRICK_APP_GROUP)]

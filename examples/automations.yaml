@@ -1,0 +1,90 @@
+# Example Home Assistant automations for Brick Hub.
+# Paste into automations.yaml (or recreate in the UI). Entity ids assume the
+# default names; adjust person./media_player./etc to your own.
+
+- alias: "Brick: bedtime"
+  triggers:
+    - trigger: time
+      at: "21:30:00"
+  actions:
+    - action: brick_hub.brick
+      data:
+        mode: Bedtime          # a mode name from the iPhone app
+        duration: "09:00:00"   # auto-unbrick at 6:30
+        source: Bedtime
+
+- alias: "Brick: leaving home for the gym"
+  triggers:
+    - trigger: zone
+      entity_id: person.me
+      zone: zone.gym
+      event: enter
+  actions:
+    - action: brick_hub.brick
+      data:
+        mode: Deep work
+        source: Gym
+
+- alias: "Brick: TV on means no phone"
+  triggers:
+    - trigger: state
+      entity_id: media_player.living_room_tv
+      to: "playing"
+      for: "00:02:00"
+  actions:
+    - action: brick_hub.brick
+      data:
+        source: Movie night
+- alias: "Unbrick: TV off"
+  triggers:
+    - trigger: state
+      entity_id: media_player.living_room_tv
+      to: "off"
+  conditions:
+    # Only undo what the TV automation did.
+    - condition: state
+      entity_id: switch.brick_hub_bricked
+      attribute: source
+      state: Movie night
+  actions:
+    - action: brick_hub.unbrick   # automations may unbrick even in strict mode
+
+- alias: "Brick: focus time while the office light is on"
+  triggers:
+    - trigger: state
+      entity_id: light.office
+      to: "on"
+  actions:
+    - action: brick_hub.brick
+      data:
+        mode: Deep work
+        duration: "01:30:00"
+        source: Office
+
+# A cheap ESPHome NFC reader (PN532/RC522) by the front door works as a
+# "brick" - register its tag ids with brick_hub.add_tag or scan the same tag
+# with the iPhone app. No automation needed: Brick Hub listens to tag_scanned.
+
+- alias: "Brick Hub: nag if Screen Time access is revoked"
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.brick_hub_screen_time_access
+      to: "on"
+  actions:
+    - action: notify.notify
+      data:
+        title: Brick Hub
+        message: Screen Time access was turned off on your phone. Bricks won't work until it's back on.
+
+- alias: "Brick Hub: lights flash when bricked"
+  triggers:
+    - trigger: event
+      event_type: brick_hub_state_changed
+      event_data:
+        bricked: true
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.desk
+      data:
+        flash: short
