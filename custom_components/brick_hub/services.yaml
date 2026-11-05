@@ -1,0 +1,50 @@
+brick:
+  fields:
+    mode:
+      example: "Deep work"
+      selector:
+        text:
+    duration:
+      example: "01:30:00"
+      selector:
+        duration:
+    source:
+      example: "Bedtime"
+      selector:
+        text:
+unbrick:
+  fields:
+    source:
+      selector:
+        text:
+toggle:
+  fields:
+    mode:
+      selector:
+        text:
+    duration:
+      selector:
+        duration:
+    source:
+      selector:
+        text:
+emergency_unbrick:
+request_emergency_reset:
+cancel_emergency_reset:
+add_tag:
+  fields:
+    tag_id:
+      required: true
+      example: "04-A1-B2-C3-D4-E5-F6"
+      selector:
+        text:
+    name:
+      example: "Desk brick"
+      selector:
+        text:
+remove_tag:
+  fields:
+    tag_id:
+      required: true
+      selector:
+        text:

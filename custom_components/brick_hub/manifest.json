@@ -1,0 +1,15 @@
+{
+  "domain": "brick_hub",
+  "name": "Brick Hub",
+  "codeowners": ["@attiswil"],
+  "config_flow": true,
+  "dependencies": ["http"],
+  "after_dependencies": ["tag"],
+  "documentation": "https://github.com/attiswil/brick",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/attiswil/brick/issues",
+  "requirements": ["h2>=4.1.0"],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
